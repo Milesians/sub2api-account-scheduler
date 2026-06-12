@@ -1,0 +1,73 @@
+from datetime import UTC, datetime
+
+from scheduler.models import AccountState, Decision
+from scheduler.store import Store
+from scheduler.ui import snapshot, start_background
+
+NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+
+
+def test_snapshot_returns_dashboard_data(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    heartbeat.touch()
+
+    store = Store(str(db))
+    store.save_states([
+        AccountState(
+            account_id=7,
+            last_priority=1050,
+            last_7d_used=42.0,
+            last_5h_used=12.0,
+            last_sampled_at=NOW,
+            hourly_burn_ewma=0.2,
+        )
+    ], NOW)
+    store.add_decisions("run-1", [
+        Decision(
+            account_id=7,
+            name="pay1",
+            current_priority=100,
+            target_priority=1050,
+            reason="takeover",
+            seven_day_used=42.0,
+            five_hour_used=12.0,
+            usage_source="passive",
+        )
+    ], NOW)
+    store.close()
+
+    data = snapshot(str(db), str(heartbeat))
+
+    assert data["summary"]["account_count"] == 1
+    assert data["summary"]["last_run_changed_count"] == 1
+    assert data["heartbeat"]["exists"] is True
+    assert data["accounts"][0]["name"] == "pay1"
+    assert data["decisions"][0]["changed"] is True
+
+
+def test_start_background_serves_snapshot(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        platform="openai",
+        account_name_pattern=r"pay\d+",
+    )
+    try:
+        host, port = server.server_address
+        import json
+        from urllib.request import urlopen
+
+        with urlopen(f"http://{host}:{port}/api/snapshot", timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assert data["config"]["platform"] == "openai"
+        assert data["config"]["account_name_pattern"] == r"pay\d+"
+    finally:
+        server.shutdown()
+        server.server_close()
