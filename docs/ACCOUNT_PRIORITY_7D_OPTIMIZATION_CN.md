@@ -539,7 +539,7 @@ mild_boost_ratio: 0.35
 max_boost_min: 1
 boost_load_factor_multiplier: 3.0
 mild_load_factor_multiplier: 2.0
-max_load_factor: 10
+max_load_factor: 100
 max_active_probes_per_round: 10
 usage_stale_threshold_minutes: 90
 cooldown_minutes: 60
