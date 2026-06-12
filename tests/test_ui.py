@@ -1,10 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from scheduler.models import AccountState, Decision
 from scheduler.store import Store
 from scheduler.ui import snapshot, start_background
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+RESET = NOW + timedelta(hours=84)
 
 
 def test_snapshot_returns_dashboard_data(tmp_path):
@@ -18,6 +19,7 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             account_id=7,
             last_priority=1050,
             last_7d_used=42.0,
+            last_7d_reset_at=RESET,
             last_5h_used=12.0,
             last_sampled_at=NOW,
             hourly_burn_ewma=0.2,
@@ -33,6 +35,7 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             target_load_factor=1,
             reason="takeover",
             seven_day_used=42.0,
+            seven_day_reset_at=RESET,
             five_hour_used=12.0,
             usage_source="passive",
         )
@@ -45,6 +48,8 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["summary"]["last_run_changed_count"] == 1
     assert data["heartbeat"]["exists"] is True
     assert data["accounts"][0]["name"] == "pay1"
+    assert data["accounts"][0]["last_7d_reset_at"] == "2026-06-15T22:00:00Z"
+    assert data["decisions"][0]["seven_day_reset_at"] == "2026-06-15T22:00:00Z"
     assert data["decisions"][0]["changed"] is True
 
 

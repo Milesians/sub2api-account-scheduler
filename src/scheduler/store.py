@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .models import AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS decision_log (
     reason           TEXT,
     seven_day_used        REAL,
     seven_day_sonnet_used REAL,
+    seven_day_reset_at    TEXT,
     five_hour_used        REAL,
     recent_hour_burn      REAL,
     recent_5h_burn        REAL,
@@ -83,6 +84,7 @@ DECISION_LOG_COLUMNS = {
     "target_load_factor": "INTEGER",
     "seven_day_used": "REAL",
     "seven_day_sonnet_used": "REAL",
+    "seven_day_reset_at": "TEXT",
     "five_hour_used": "REAL",
     "recent_hour_burn": "REAL",
     "recent_5h_burn": "REAL",
@@ -123,6 +125,9 @@ MIGRATIONS = {
     3: """
        ALTER TABLE decision_log ADD COLUMN current_load_factor INTEGER;
        ALTER TABLE decision_log ADD COLUMN target_load_factor INTEGER;
+       """,
+    4: """
+       ALTER TABLE decision_log ADD COLUMN seven_day_reset_at TEXT;
        """,
 }
 
@@ -309,10 +314,10 @@ class Store:
             """INSERT INTO decision_log
                (run_id, account_id, account_name, decided_at, current_priority, target_priority,
                 current_load_factor, target_load_factor, catchup_score, reason,
-                seven_day_used, seven_day_sonnet_used, five_hour_used,
+                seven_day_used, seven_day_sonnet_used, seven_day_reset_at, five_hour_used,
                 recent_hour_burn, recent_5h_burn, safe_hour_cap, target_now, projected_end,
                 required_rate, recent_rate, remaining_hours, usage_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     run_id,
@@ -327,6 +332,7 @@ class Store:
                     d.reason,
                     d.seven_day_used,
                     d.seven_day_sonnet_used,
+                    _iso(d.seven_day_reset_at),
                     d.five_hour_used,
                     d.recent_hour_burn,
                     d.recent_5h_burn,

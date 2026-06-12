@@ -43,6 +43,7 @@ def decide(
             reason="",
             seven_day_used=snap.seven_day_used,
             seven_day_sonnet_used=snap.seven_day_sonnet_used,
+            seven_day_reset_at=snap.seven_day_reset_at,
             five_hour_used=snap.five_hour_used,
             usage_source=snap.usage_source,
         )

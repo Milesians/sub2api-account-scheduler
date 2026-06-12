@@ -77,6 +77,7 @@ class Decision:
     catchup_score: float | None = None
     seven_day_used: float | None = None
     seven_day_sonnet_used: float | None = None
+    seven_day_reset_at: datetime | None = None
     five_hour_used: float | None = None
     recent_hour_burn: float | None = None
     recent_5h_burn: float | None = None

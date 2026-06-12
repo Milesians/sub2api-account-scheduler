@@ -245,6 +245,7 @@ HTML = """<!doctype html>
               <th>账号</th>
               <th>Priority</th>
               <th>7d</th>
+              <th>7d 刷新</th>
               <th>5h</th>
               <th>EWMA/h</th>
               <th>Cooldown</th>
@@ -272,6 +273,7 @@ HTML = """<!doctype html>
               <th>Priority / LF</th>
               <th>原因</th>
               <th>7d</th>
+              <th>7d 刷新</th>
               <th>5h</th>
               <th>Catchup</th>
               <th>Burn/h</th>
@@ -336,6 +338,7 @@ HTML = """<!doctype html>
         tr.appendChild(cell(`${a.name || "-"} #${a.account_id}`, "name"));
         tr.appendChild(cell(a.last_priority ?? "-", "num"));
         tr.appendChild(cell(fmtPct(a.last_7d_used), "num"));
+        tr.appendChild(cell(fmtTime(a.last_7d_reset_at)));
         tr.appendChild(cell(fmtPct(a.last_5h_used), "num"));
         tr.appendChild(cell(fmtNum(a.hourly_burn_ewma), "num"));
         tr.appendChild(cell(fmtTime(a.cooldown_until)));
@@ -363,6 +366,7 @@ HTML = """<!doctype html>
         reason.appendChild(chip);
         tr.appendChild(reason);
         tr.appendChild(cell(fmtPct(d.seven_day_used), "num"));
+        tr.appendChild(cell(fmtTime(d.seven_day_reset_at)));
         tr.appendChild(cell(fmtPct(d.five_hour_used), "num"));
         tr.appendChild(cell(fmtNum(d.catchup_score), "num"));
         tr.appendChild(cell(fmtNum(d.recent_hour_burn), "num"));
@@ -450,6 +454,7 @@ def snapshot(
               COALESCE(d.account_name, '') AS name,
               s.last_priority,
               s.last_7d_used,
+              s.last_7d_reset_at,
               s.last_5h_used,
               s.last_sampled_at,
               s.hourly_burn_ewma,
