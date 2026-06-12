@@ -29,6 +29,8 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             name="pay1",
             current_priority=100,
             target_priority=1050,
+            current_load_factor=1,
+            target_load_factor=1,
             reason="takeover",
             seven_day_used=42.0,
             five_hour_used=12.0,

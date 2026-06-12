@@ -17,6 +17,7 @@ def iso(offset_s: float) -> str:
 def anthropic_account(id_, name, priority, util_7d, util_5h):
     return {
         "id": id_, "name": name, "type": "oauth", "priority": priority,
+        "concurrency": 1, "load_factor": None,
         "status": "active", "schedulable": True,
         "extra": {
             "session_window_utilization": util_5h,        # 0-1
@@ -30,6 +31,7 @@ def anthropic_account(id_, name, priority, util_7d, util_5h):
 def openai_account(id_, name, priority, used_7d, used_5h):
     return {
         "id": id_, "name": name, "type": "oauth", "priority": priority,
+        "concurrency": 1, "load_factor": None,
         "status": "active", "schedulable": True,
         "extra": {
             "codex_5h_used_percent": used_5h,             # 0-100
@@ -49,6 +51,7 @@ ACCOUNTS = {
         anthropic_account(4, "manual-vip", 10, 0.50, 0.50),  # 名称不匹配，不受控
         {  # 受控但无被动数据 -> 触发 active 探测
             "id": 5, "name": "team-a-cold", "type": "oauth", "priority": 50,
+            "concurrency": 1, "load_factor": None,
             "status": "active", "schedulable": True, "extra": {},
         },
     ],
@@ -58,10 +61,12 @@ ACCOUNTS = {
         openai_account(13, "codex-03", 50, 99.5, 10.0),      # 触 7d 硬保护
         {  # apikey 类型：无窗口数据，应被 type 过滤排除
             "id": 14, "name": "codex-apikey", "type": "apikey", "priority": 50,
+            "concurrency": 1, "load_factor": None,
             "status": "active", "schedulable": True, "extra": {},
         },
         {  # 受控但无被动数据 -> 触发 active 探测
             "id": 15, "name": "codex-cold", "type": "oauth", "priority": 50,
+            "concurrency": 1, "load_factor": None,
             "status": "active", "schedulable": True, "extra": {},
         },
     ],

@@ -71,18 +71,19 @@ class AdminAPI:
             log.warning("active probe failed account_id=%s: %s", account_id, e)
             return None
 
-    def bulk_update_priority(self, account_ids: list[int], priority: int) -> bool:
-        """按档位批量更新 priority（指针语义局部更新）。失败返回 False，不重试。"""
+    def bulk_update_accounts(self, account_ids: list[int], fields: dict[str, Any]) -> bool:
+        """批量局部更新账号字段。失败返回 False，不重试。"""
+        payload = {"account_ids": account_ids, **fields}
         try:
             resp = self.session.post(
                 f"{self.base_url}/api/v1/admin/accounts/bulk-update",
-                json={"account_ids": account_ids, "priority": priority},
+                json=payload,
                 timeout=self.timeout,
             )
             self._get_data(resp)
             return True
         except Exception as e:
-            log.error("bulk-update failed priority=%s ids=%s: %s", priority, account_ids, e)
+            log.error("bulk-update failed fields=%s ids=%s: %s", fields, account_ids, e)
             return False
 
 
@@ -130,6 +131,8 @@ def parse_account(raw: dict, now: datetime, platform: str) -> AccountSnapshot:
         name=raw.get("name") or "",
         type=raw.get("type") or "",
         priority=int(raw.get("priority") or 0),
+        concurrency=int(raw.get("concurrency") or 0),
+        load_factor=_int_or_none(raw.get("load_factor")),
         status=raw.get("status") or "",
         schedulable=bool(raw.get("schedulable")),
         rate_limited=_in_future(_parse_time(raw.get("rate_limit_reset_at")), now),
@@ -168,3 +171,12 @@ def merge_probe(snap: AccountSnapshot, usage: dict, now: datetime) -> None:
 
 def _in_future(dt: datetime | None, now: datetime) -> bool:
     return dt is not None and dt > now
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

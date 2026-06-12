@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .models import AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS decision_log (
     decided_at       TEXT    NOT NULL,
     current_priority INTEGER,
     target_priority  INTEGER,
+    current_load_factor INTEGER,
+    target_load_factor  INTEGER,
     catchup_score    REAL,
     reason           TEXT,
     seven_day_used        REAL,
@@ -77,6 +79,8 @@ CREATE INDEX IF NOT EXISTS idx_decision_account
 
 DECISION_LOG_COLUMNS = {
     "account_name": "TEXT",
+    "current_load_factor": "INTEGER",
+    "target_load_factor": "INTEGER",
     "seven_day_used": "REAL",
     "seven_day_sonnet_used": "REAL",
     "five_hour_used": "REAL",
@@ -115,6 +119,10 @@ MIGRATIONS = {
        ALTER TABLE decision_log ADD COLUMN required_rate REAL;
        ALTER TABLE decision_log ADD COLUMN recent_rate REAL;
        ALTER TABLE decision_log ADD COLUMN remaining_hours REAL;
+       """,
+    3: """
+       ALTER TABLE decision_log ADD COLUMN current_load_factor INTEGER;
+       ALTER TABLE decision_log ADD COLUMN target_load_factor INTEGER;
        """,
 }
 
@@ -300,10 +308,11 @@ class Store:
         self.conn.executemany(
             """INSERT INTO decision_log
                (run_id, account_id, account_name, decided_at, current_priority, target_priority,
-                catchup_score, reason, seven_day_used, seven_day_sonnet_used, five_hour_used,
+                current_load_factor, target_load_factor, catchup_score, reason,
+                seven_day_used, seven_day_sonnet_used, five_hour_used,
                 recent_hour_burn, recent_5h_burn, safe_hour_cap, target_now, projected_end,
                 required_rate, recent_rate, remaining_hours, usage_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     run_id,
@@ -312,6 +321,8 @@ class Store:
                     _iso(now),
                     d.current_priority,
                     d.target_priority,
+                    d.current_load_factor,
+                    d.target_load_factor,
                     d.catchup_score,
                     d.reason,
                     d.seven_day_used,

@@ -269,7 +269,7 @@ HTML = """<!doctype html>
             <tr>
               <th>时间</th>
               <th>账号</th>
-              <th>Priority</th>
+              <th>Priority / LF</th>
               <th>原因</th>
               <th>7d</th>
               <th>5h</th>
@@ -353,7 +353,8 @@ HTML = """<!doctype html>
         const tr = document.createElement("tr");
         tr.appendChild(cell(fmtTime(d.decided_at)));
         tr.appendChild(cell(`${d.account_name || "-"} #${d.account_id}`, "name"));
-        const pr = cell(`${d.current_priority ?? "-"} -> ${d.target_priority ?? "-"}`, d.changed ? "changed num" : "num");
+        const lf = `${d.current_load_factor ?? "-"} -> ${d.target_load_factor ?? "-"}`;
+        const pr = cell(`${d.current_priority ?? "-"} -> ${d.target_priority ?? "-"} / LF ${lf}`, d.changed ? "changed num" : "num");
         tr.appendChild(pr);
         const reason = document.createElement("td");
         const chip = document.createElement("span");
@@ -458,6 +459,8 @@ def snapshot(
               d.reason AS last_reason,
               d.current_priority AS last_current_priority,
               d.target_priority AS last_target_priority,
+              d.current_load_factor AS last_current_load_factor,
+              d.target_load_factor AS last_target_load_factor,
               d.decided_at AS last_decided_at
             FROM account_state s
             LEFT JOIN (
@@ -570,9 +573,9 @@ def _summary(
         "last_run_id": last_run_id,
         "last_decided_at": last["decided_at"] if last else None,
         "last_run_decision_count": len(last_run),
-        "last_run_changed_count": sum(1 for d in last_run if d["current_priority"] != d["target_priority"]),
+        "last_run_changed_count": sum(1 for d in last_run if _is_changed(d)),
         "changed_account_count": sum(
-            1 for d in latest_by_account.values() if d["current_priority"] != d["target_priority"]
+            1 for d in latest_by_account.values() if _is_changed(d)
         ),
     }
 
@@ -587,8 +590,15 @@ def _heartbeat(path: str) -> dict[str, Any]:
 
 
 def _with_changed(row: dict[str, Any]) -> dict[str, Any]:
-    row["changed"] = row["current_priority"] != row["target_priority"]
+    row["changed"] = _is_changed(row)
     return row
+
+
+def _is_changed(row: dict[str, Any]) -> bool:
+    return (
+        row.get("current_priority") != row.get("target_priority")
+        or row.get("current_load_factor") != row.get("target_load_factor")
+    )
 
 
 def _limit(values: list[str] | None) -> int:

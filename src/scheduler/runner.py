@@ -51,19 +51,22 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
 
     for d in sorted(decisions, key=lambda x: x.account_id):
         log.info(
-            "run=%s decision account=%d(%s) %d->%d reason=%s 7d=%s sonnet=%s 5h=%s "
-            "catchup=%s burn=%s cap=%s src=%s",
-            run_id, d.account_id, d.name, d.current_priority, d.target_priority, d.reason,
+            "run=%s decision account=%d(%s) priority=%d->%d load_factor=%d->%d "
+            "reason=%s 7d=%s sonnet=%s 5h=%s catchup=%s burn=%s cap=%s src=%s",
+            run_id, d.account_id, d.name, d.current_priority, d.target_priority,
+            d.current_load_factor, d.target_load_factor, d.reason,
             _fmt(d.seven_day_used), _fmt(d.seven_day_sonnet_used), _fmt(d.five_hour_used),
             _fmt(d.catchup_score), _fmt(d.recent_hour_burn), _fmt(d.safe_hour_cap), d.usage_source,
         )
 
     updated = 0
-    for band in cfg.priority_bands:
-        ids = [d.account_id for d in decisions if d.changed and d.target_priority == band]
-        if not ids:
-            continue
-        if api.bulk_update_priority(ids, band):
+    update_groups: dict[tuple[int, int], list[int]] = {}
+    for d in decisions:
+        if d.changed:
+            update_groups.setdefault((d.target_priority, d.target_load_factor), []).append(d.account_id)
+
+    for (priority, load_factor), ids in update_groups.items():
+        if api.bulk_update_accounts(ids, {"priority": priority, "load_factor": load_factor}):
             updated += len(ids)
         else:
             # 更新失败不重试；回退 last_priority，下轮以 list 真实值重新决策

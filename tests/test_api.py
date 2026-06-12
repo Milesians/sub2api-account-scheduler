@@ -13,6 +13,8 @@ def base_raw(**extra):
         "name": "acc",
         "type": "oauth",
         "priority": 1050,
+        "concurrency": 2,
+        "load_factor": None,
         "status": "active",
         "schedulable": True,
         "extra": extra,
@@ -29,6 +31,9 @@ def test_parse_anthropic_ratio_fields():
     raw["session_window_end"] = "2026-06-12T12:00:00Z"
     snap = parse_account(raw, NOW, "anthropic")
     assert snap.five_hour_used == 30.0      # 0-1 -> 0-100
+    assert snap.concurrency == 2
+    assert snap.load_factor is None
+    assert snap.effective_load_factor == 2
     assert snap.seven_day_used == 42.0
     assert snap.seven_day_reset_at == NOW + timedelta(hours=84)
     assert snap.five_hour_reset_at == datetime(2026, 6, 12, 12, 0, tzinfo=UTC)
@@ -50,6 +55,14 @@ def test_parse_openai_codex_percent_fields():
     assert snap.five_hour_reset_at == datetime(2026, 6, 12, 12, 0, tzinfo=UTC)
     assert snap.sampled_at == datetime(2026, 6, 12, 9, 59, tzinfo=UTC)
     assert snap.usage_source == "passive"
+
+
+def test_parse_load_factor_when_present():
+    raw = base_raw(load_factor_marker=True)
+    raw["load_factor"] = 6
+    snap = parse_account(raw, NOW, "openai")
+    assert snap.load_factor == 6
+    assert snap.effective_load_factor == 6
 
 
 def test_parse_openai_without_codex_fields_is_missing():

@@ -22,6 +22,8 @@ def mk_snap(account_id: int, seven_day: float | None, **kw) -> AccountSnapshot:
         name=f"acc-{account_id}",
         type="oauth",
         priority=1050,
+        concurrency=1,
+        load_factor=None,
         status="active",
         schedulable=True,
         rate_limited=False,
@@ -83,8 +85,9 @@ def test_sonnet_window_counts_for_protection():
 
 
 def test_protect_7d_at_target():
-    d, _ = decide_one(mk_snap(1, 97.5, priority=1010), mk_state(1, 97.0))
+    d, _ = decide_one(mk_snap(1, 97.5, priority=1010, load_factor=3), mk_state(1, 97.0))
     assert d.target_priority == 1070
+    assert d.target_load_factor == 1
     assert d.reason == "protect_7d"
 
 
@@ -105,7 +108,8 @@ def test_new_cooldown_when_burning_too_fast_near_curve():
 def test_fast_burn_does_not_cooldown_when_clearly_behind():
     d, _ = decide_one(mk_snap(1, 20.0), mk_state(1, 18.0), peers=[neutral_peer(2)])
     assert d.reason != "new_cooldown"
-    assert d.target_priority == 1030
+    assert d.target_priority == 1050
+    assert d.target_load_factor == 3
 
 
 def test_will_hit_goal_soon_sets_cooldown():
@@ -138,8 +142,9 @@ def test_first_seen_takes_over_to_normal():
 
 def test_first_seen_in_band_can_be_scheduled_with_valid_data():
     d, _ = decide_one(mk_snap(1, 40.0, priority=1030))
-    assert d.target_priority == 1010
+    assert d.target_priority == 1050
     assert d.reason == "boost"
+    assert d.target_load_factor == 3
 
 
 def test_invalid_reset_holds_current_priority():
@@ -150,13 +155,14 @@ def test_invalid_reset_holds_current_priority():
     assert states[1].last_7d_used == 49.0
 
 
-def test_behind_account_boosts_one_band_per_round():
-    # 严重落后（进度应 48.5，实际 10），但 boost 需要至少 2 个候选；
-    # 单个落后账号会被降级到 mild，且受防抖限制一次一档
+def test_behind_account_boosts_with_load_factor_not_priority():
+    # 严重落后（进度应 48.5，实际 10），补量只提高 load_factor，
+    # priority 仍回到 normal，避免成为唯一低 priority 入口。
     behind = mk_snap(1, 10.0)
     d, _ = decide_one(behind, mk_state(1, 9.5), peers=[neutral_peer(2)])
-    assert d.reason == "boost_demoted_single"
-    assert d.target_priority == 1030
+    assert d.reason == "boost"
+    assert d.target_priority == 1050
+    assert d.target_load_factor == 3
     assert d.target_now is not None
     assert d.projected_end is not None
     assert d.required_rate is not None
@@ -170,9 +176,11 @@ def test_two_behind_accounts_enter_boost():
     states = {1: mk_state(1, 9.5, last_priority=1030), 2: mk_state(2, 11.5, last_priority=1030)}
     decisions, new_states = decide([a, b, neutral_peer(3)], states, cfg, NOW)
     by_id = {d.account_id: d for d in decisions}
-    assert by_id[1].target_priority == 1010
-    assert by_id[2].target_priority == 1010
+    assert by_id[1].target_priority == 1050
+    assert by_id[2].target_priority == 1050
     assert by_id[1].reason == "boost"
+    assert by_id[1].target_load_factor == 3
+    assert by_id[2].target_load_factor == 3
     assert new_states[1].last_boost_at == NOW
     assert new_states[2].last_boost_at == NOW
 
@@ -187,7 +195,7 @@ def test_recent_5h_burn_reduces_catchup_score():
 
 
 def test_emergency_window_allows_band_jump():
-    # 剩余 6h、明显落后：从 1070 直接跳补量档，不受一次一档限制
+    # 剩余 6h、明显落后：priority 回 normal，补量通过 load_factor 加权。
     snap = mk_snap(1, 50.0, priority=1070, seven_day_reset_at=NOW + timedelta(hours=6))
     peer = mk_snap(2, 50.0, seven_day_reset_at=NOW + timedelta(hours=6))
     cfg = mk_cfg(max_boost_min=2)
@@ -195,15 +203,17 @@ def test_emergency_window_allows_band_jump():
     states[1].last_7d_reset_at = NOW + timedelta(hours=6)
     states[2].last_7d_reset_at = NOW + timedelta(hours=6)
     decisions, _ = decide([snap, peer], states, cfg, NOW)
-    assert {d.target_priority for d in decisions} == {1010}
-    assert {d.reason for d in decisions} == {"boost_emergency_jump"}
+    assert {d.target_priority for d in decisions} == {1050}
+    assert {d.reason for d in decisions} == {"boost"}
+    assert {d.target_load_factor for d in decisions} == {3}
 
 
 def test_behind_account_can_boost_when_5h_high():
     snap = mk_snap(1, 10.0, five_hour_used=93.0)
     d, _ = decide_one(snap, mk_state(1, 9.5), peers=[neutral_peer(2)])
-    assert d.reason == "boost_demoted_single"
-    assert d.target_priority == 1030
+    assert d.reason == "boost"
+    assert d.target_priority == 1050
+    assert d.target_load_factor == 3
 
 
 def test_ahead_account_steps_toward_protect():
@@ -239,4 +249,5 @@ def test_unmanaged_band_priority_steps_from_normal():
     # 有历史但 priority 被外部改成 200：防抖基准视为 normal 档
     snap = mk_snap(1, 10.0, priority=200)
     d, _ = decide_one(snap, mk_state(1, 9.5, last_priority=200), peers=[neutral_peer(2)])
-    assert d.target_priority == 1030
+    assert d.target_priority == 1050
+    assert d.target_load_factor == 3

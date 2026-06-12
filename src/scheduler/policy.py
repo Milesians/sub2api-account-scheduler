@@ -38,6 +38,8 @@ def decide(
             name=snap.name,
             current_priority=snap.priority,
             target_priority=snap.priority,
+            current_load_factor=snap.effective_load_factor,
+            target_load_factor=snap.effective_load_factor,
             reason="",
             seven_day_used=snap.seven_day_used,
             seven_day_sonnet_used=snap.seven_day_sonnet_used,
@@ -52,13 +54,13 @@ def decide(
         # 首次接管非法档位例外：先归一到 normal，避免外部旧 priority 持续吸流。
         if snap.seven_day_used is None or snap.seven_day_reset_at is None or snap.sampled_at is None:
             if first_takeover_invalid:
-                _finalize(d, state, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover")
             else:
                 d.reason = "no_data_hold"
             continue
         if (now - snap.sampled_at) > timedelta(minutes=cfg.usage_stale_threshold_minutes):
             if first_takeover_invalid:
-                _finalize(d, state, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover")
             else:
                 d.reason = "stale_hold"
             continue
@@ -67,7 +69,7 @@ def decide(
         remaining_h_raw = (snap.seven_day_reset_at - now).total_seconds() / 3600.0
         if remaining_h_raw <= 0.0 or remaining_h_raw > cfg.window_hours:
             if first_takeover_invalid:
-                _finalize(d, state, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover")
             else:
                 d.reason = "invalid_reset_hold"
             continue
@@ -85,17 +87,17 @@ def decide(
 
         # 硬规则：允许跳档直接到位
         if seven_day >= cfg.hard_cap_7d_utilization:
-            _finalize(d, state, cfg.band_floor, "hard_cap_7d")
+            _finalize(d, state, snap, cfg.band_floor, "hard_cap_7d")
             continue
         if snap.five_hour_used is not None and snap.five_hour_used >= cfg.hard_cap_5h_utilization:
-            _finalize(d, state, cfg.band_floor, "hard_cap_5h")
+            _finalize(d, state, snap, cfg.band_floor, "hard_cap_5h")
             continue
         if seven_day >= cfg.target_7d_utilization:
-            _finalize(d, state, cfg.band_protect, "protect_7d")
+            _finalize(d, state, snap, cfg.band_protect, "protect_7d")
             continue
         if state.cooldown_until is not None and state.cooldown_until > now:
             target = _most_protective(snap.priority, cfg.band_protect, cfg)
-            _finalize(d, state, target, "cooldown_hold")
+            _finalize(d, state, snap, target, "cooldown_hold")
             continue
         if _needs_cooldown(cfg, seven_day, remaining_h, recent_burn, metrics, cap):
             state.cooldown_until = now + timedelta(minutes=cfg.cooldown_minutes)
@@ -104,13 +106,13 @@ def decide(
                 if _will_hit_goal_soon(cfg, seven_day, remaining_h, recent_burn)
                 else "new_cooldown"
             )
-            _finalize(d, state, cfg.band_protect, reason)
+            _finalize(d, state, snap, cfg.band_protect, reason)
             continue
         if metrics.ahead >= cfg.ahead_band_pp and metrics.projected_end >= cfg.target_7d_utilization:
-            _finalize(d, state, cfg.band_protect, "ahead_protect")
+            _finalize(d, state, snap, cfg.band_protect, "ahead_protect")
             continue
         if first_takeover_invalid:
-            _finalize(d, state, cfg.band_normal, "takeover")
+            _finalize(d, state, snap, cfg.band_normal, "takeover")
             continue
 
         ranking.append(
@@ -191,20 +193,12 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
     )
 
     strong_candidates = [r for r in ranked if r.catchup >= cfg.strong_score_threshold]
-    strong: list[_Ranked] = []
-    demoted: _Ranked | None = None
-    if len(strong_candidates) == 1 and eligible_total > 1:
-        demoted = strong_candidates[0]
-    else:
-        strong = strong_candidates[:strong_cap]
+    strong = strong_candidates[:strong_cap]
 
     strong_ids = {r.snap.id for r in strong}
-    demoted_id = demoted.snap.id if demoted is not None else None
     mild: list[_Ranked] = []
-    if demoted is not None and mild_cap > 0:
-        mild.append(demoted)
     for r in ranked:
-        if r.snap.id in strong_ids or r.snap.id == demoted_id:
+        if r.snap.id in strong_ids:
             continue
         if r.catchup >= cfg.mild_score_threshold and len(mild) < mild_cap:
             mild.append(r)
@@ -212,11 +206,9 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
 
     for r in ranking:
         if r.snap.id in strong_ids:
-            _assign(r, r.decision, cfg.band_boost, "boost", cfg)
-        elif r.snap.id == demoted_id:
-            _assign(r, r.decision, cfg.band_mild, "boost_demoted_single", cfg)
+            _assign(r, r.decision, cfg.band_normal, "boost", cfg)
         elif r.snap.id in mild_ids:
-            _assign(r, r.decision, cfg.band_mild, "mild_boost", cfg)
+            _assign(r, r.decision, cfg.band_normal, "mild_boost", cfg)
         else:
             _assign(r, r.decision, cfg.band_normal, "normal", cfg)
 
@@ -234,15 +226,29 @@ def _assign(r: _Ranked, d: Decision, target: int, reason: str, cfg: Config) -> N
             reason = f"{reason}_emergency_jump"
     d.target_priority = target
     d.reason = reason
+    d.target_load_factor = _load_factor_for_reason(r, target, reason, cfg)
     r.state.last_priority = target
-    if target in (cfg.band_boost, cfg.band_mild):
+    if d.target_load_factor > r.snap.base_load_factor:
         r.state.last_boost_at = r.snap.sampled_at
 
 
-def _finalize(d: Decision, state: AccountState, target: int, reason: str) -> None:
+def _finalize(d: Decision, state: AccountState, snap: AccountSnapshot, target: int, reason: str) -> None:
     d.target_priority = target
+    d.target_load_factor = snap.base_load_factor
     d.reason = reason
     state.last_priority = target
+
+
+def _load_factor_for_reason(r: _Ranked, target: int, reason: str, cfg: Config) -> int:
+    base = r.snap.base_load_factor
+    multiplier = 1.0
+    if target != cfg.band_normal:
+        return base
+    if reason.startswith("boost"):
+        multiplier = cfg.boost_load_factor_multiplier
+    elif reason == "mild_boost":
+        multiplier = cfg.mild_load_factor_multiplier
+    return max(1, min(cfg.max_load_factor, math.ceil(base * multiplier)))
 
 
 def _update_burn(state: AccountState, snap: AccountSnapshot) -> float | None:

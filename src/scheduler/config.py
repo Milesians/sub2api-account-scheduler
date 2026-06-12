@@ -25,6 +25,9 @@ class Config:
     max_boost_ratio: float = 0.15
     mild_boost_ratio: float = 0.35
     max_boost_min: int = 1
+    boost_load_factor_multiplier: float = 3.0
+    mild_load_factor_multiplier: float = 2.0
+    max_load_factor: int = 10
     max_active_probes_per_round: int = 10
     usage_stale_threshold_minutes: int = 90
     cooldown_minutes: int = 60

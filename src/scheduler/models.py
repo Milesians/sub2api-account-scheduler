@@ -27,6 +27,8 @@ class AccountSnapshot:
     sampled_at: datetime | None = None
     recent_5h_burn: float | None = None
     usage_source: str = "missing"  # passive / active / missing
+    concurrency: int = 1
+    load_factor: int | None = None
 
     @property
     def eligible(self) -> bool:
@@ -37,6 +39,14 @@ class AccountSnapshot:
             and not self.overloaded
             and not self.temp_unschedulable
         )
+
+    @property
+    def base_load_factor(self) -> int:
+        return self.concurrency if self.concurrency > 0 else 1
+
+    @property
+    def effective_load_factor(self) -> int:
+        return self.load_factor if self.load_factor is not None and self.load_factor > 0 else self.base_load_factor
 
 
 @dataclass
@@ -77,7 +87,12 @@ class Decision:
     recent_rate: float | None = None
     remaining_hours: float | None = None
     usage_source: str = "missing"
+    current_load_factor: int = 1
+    target_load_factor: int = 1
 
     @property
     def changed(self) -> bool:
-        return self.target_priority != self.current_priority
+        return (
+            self.target_priority != self.current_priority
+            or self.target_load_factor != self.current_load_factor
+        )

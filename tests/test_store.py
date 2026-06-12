@@ -69,7 +69,9 @@ def test_decision_log_keeps_scheduler_metrics(tmp_path):
             account_id=1,
             name="pay1",
             current_priority=1050,
-            target_priority=1030,
+            target_priority=1050,
+            current_load_factor=1,
+            target_load_factor=2,
             reason="mild_boost",
             catchup_score=2.5,
             recent_hour_burn=0.4,
@@ -84,6 +86,8 @@ def test_decision_log_keeps_scheduler_metrics(tmp_path):
 
         row = store.conn.execute("SELECT * FROM decision_log WHERE account_id = 1").fetchone()
         assert row["recent_5h_burn"] == 0.2
+        assert row["current_load_factor"] == 1
+        assert row["target_load_factor"] == 2
         assert row["target_now"] == 48.5
         assert row["projected_end"] == 91.0
         assert row["required_rate"] == 0.7
