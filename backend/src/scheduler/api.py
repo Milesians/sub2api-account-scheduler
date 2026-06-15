@@ -86,6 +86,29 @@ class AdminAPI:
             log.error("bulk-update failed fields=%s ids=%s: %s", fields, account_ids, e)
             return False
 
+    def codex_invite_reset_status(self, account_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/status",
+            timeout=self.timeout,
+        )
+        return self._get_data(resp)
+
+    def send_codex_invite_reset_invite(self, account_id: int, emails: list[str]) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/invite",
+            json={"emails": emails},
+            timeout=self.timeout,
+        )
+        return self._get_data(resp)
+
+    def consume_codex_invite_reset(self, account_id: int, credit_id: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/consume",
+            json={"credit_id": credit_id},
+            timeout=self.timeout,
+        )
+        return self._get_data(resp)
+
 
 def _parse_time(value: Any) -> datetime | None:
     """解析 RFC3339 字符串或 Unix 秒为 UTC datetime。"""

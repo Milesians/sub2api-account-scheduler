@@ -1,12 +1,13 @@
-"""只读调度看板。
+"""调度看板后端。
 
-使用标准库 HTTPServer，避免为一个内网看板引入 Web 框架。
+使用标准库 HTTPServer，提供快照 API、邀请管理代理和前端静态文件托管。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -16,8 +17,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .api import AdminAPI
 from .config import load_config
 from .store import Store
+
+STATIC_DIR = Path(__file__).with_name("frontend")
 
 
 HTML = """<!doctype html>
@@ -404,9 +408,11 @@ def serve(
     heartbeat_file: str,
     platform: str = "",
     account_name_pattern: str = "",
+    base_url: str = "",
+    admin_key: str = "",
 ) -> None:
     Store(db_path).close()
-    handler = _handler(db_path, heartbeat_file, platform, account_name_pattern)
+    handler = _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key)
     ThreadingHTTPServer((host, port), handler).serve_forever()
 
 
@@ -417,9 +423,14 @@ def start_background(
     heartbeat_file: str,
     platform: str = "",
     account_name_pattern: str = "",
+    base_url: str = "",
+    admin_key: str = "",
 ) -> ThreadingHTTPServer:
     Store(db_path).close()
-    server = ThreadingHTTPServer((host, port), _handler(db_path, heartbeat_file, platform, account_name_pattern))
+    server = ThreadingHTTPServer(
+        (host, port),
+        _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key),
+    )
     thread = threading.Thread(target=server.serve_forever, name="scheduler-ui", daemon=True)
     thread.start()
     return server
@@ -505,7 +516,16 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    serve(args.host, args.port, cfg.db_path, cfg.heartbeat_file, cfg.platform, cfg.account_name_pattern)
+    serve(
+        args.host,
+        args.port,
+        cfg.db_path,
+        cfg.heartbeat_file,
+        cfg.platform,
+        cfg.account_name_pattern,
+        cfg.base_url,
+        cfg.admin_key,
+    )
 
 
 def _handler(
@@ -513,27 +533,109 @@ def _handler(
     heartbeat_file: str,
     platform: str,
     account_name_pattern: str,
+    base_url: str,
+    admin_key: str,
 ) -> type[BaseHTTPRequestHandler]:
+    api = AdminAPI(base_url, admin_key) if base_url and admin_key else None
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/":
-                self._send(HTTPStatus.OK, HTML.replace("__API_PATH__", "/api/snapshot"), "text/html; charset=utf-8")
-                return
             if parsed.path == "/api/snapshot":
                 limit = _limit(parse_qs(parsed.query).get("limit"))
                 body = json.dumps(
                     snapshot(db_path, heartbeat_file, limit, platform, account_name_pattern),
                     ensure_ascii=False,
                 )
-                self._send(HTTPStatus.OK, body, "application/json; charset=utf-8")
+                self._send_text(HTTPStatus.OK, body, "application/json; charset=utf-8")
                 return
-            self._send(HTTPStatus.NOT_FOUND, "not found", "text/plain; charset=utf-8")
+            if self._handle_invite_reset_get(parsed.path, api):
+                return
+            if self._send_static(parsed.path):
+                return
+            self._send_text(HTTPStatus.NOT_FOUND, "not found", "text/plain; charset=utf-8")
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if self._handle_invite_reset_post(parsed.path, api):
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def log_message(self, format: str, *args: object) -> None:
             return
 
-        def _send(self, status: HTTPStatus, body: str, content_type: str) -> None:
+        def _handle_invite_reset_get(self, path: str, api: AdminAPI | None) -> bool:
+            account_id, action = _parse_invite_reset_path(path)
+            if account_id is None or action != "status":
+                return False
+            if api is None:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "admin api is not configured"})
+                return True
+            try:
+                self._send_json(HTTPStatus.OK, api.codex_invite_reset_status(account_id))
+            except Exception as e:
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
+            return True
+
+        def _handle_invite_reset_post(self, path: str, api: AdminAPI | None) -> bool:
+            account_id, action = _parse_invite_reset_path(path)
+            if account_id is None or action not in {"invite", "consume"}:
+                return False
+            if api is None:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "admin api is not configured"})
+                return True
+            try:
+                payload = self._read_json()
+                if action == "invite":
+                    self._send_json(HTTPStatus.OK, api.send_codex_invite_reset_invite(account_id, payload.get("emails") or []))
+                    return True
+                self._send_json(HTTPStatus.OK, api.consume_codex_invite_reset(account_id, str(payload.get("credit_id") or "")))
+            except ValueError as e:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+            except Exception as e:
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
+            return True
+
+        def _read_json(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length", 0))
+            if length <= 0:
+                return {}
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("request body must be a JSON object")
+            return data
+
+        def _send_static(self, path: str) -> bool:
+            if path == "/":
+                if (STATIC_DIR / "index.html").is_file():
+                    return self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
+                self._send_text(HTTPStatus.OK, HTML.replace("__API_PATH__", "/api/snapshot"), "text/html; charset=utf-8")
+                return True
+            static_path = _static_path(path)
+            if static_path is None or not static_path.is_file():
+                if "." not in Path(path).name and (STATIC_DIR / "index.html").is_file():
+                    return self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
+                return False
+            content_type = mimetypes.guess_type(static_path.name)[0] or "application/octet-stream"
+            if static_path.suffix in {".js", ".css", ".svg"}:
+                content_type += "; charset=utf-8"
+            return self._send_file(static_path, content_type)
+
+        def _send_file(self, path: Path, content_type: str) -> bool:
+            data = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+
+        def _send_json(self, status: HTTPStatus, body: dict[str, Any]) -> None:
+            self._send_text(status, json.dumps(body, ensure_ascii=False), "application/json; charset=utf-8")
+
+        def _send_text(self, status: HTTPStatus, body: str, content_type: str) -> None:
             data = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -543,6 +645,28 @@ def _handler(
             self.wfile.write(data)
 
     return Handler
+
+
+def _parse_invite_reset_path(path: str) -> tuple[int | None, str]:
+    parts = path.strip("/").split("/")
+    if len(parts) != 6 or parts[:2] != ["api", "accounts"] or parts[3:5] != ["codex", "invite-reset"]:
+        return None, ""
+    try:
+        return int(parts[2]), parts[5]
+    except ValueError:
+        return None, ""
+
+
+def _static_path(path: str) -> Path | None:
+    relative = path.lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return None
+    full = (STATIC_DIR / relative).resolve()
+    try:
+        full.relative_to(STATIC_DIR.resolve())
+    except ValueError:
+        return None
+    return full
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:

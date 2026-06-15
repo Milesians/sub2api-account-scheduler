@@ -30,12 +30,30 @@ def main() -> None:
     if args.ui:
         from .ui import serve
 
-        serve(ui_host, ui_port, cfg.db_path, cfg.heartbeat_file, cfg.platform, cfg.account_name_pattern)
+        serve(
+            ui_host,
+            ui_port,
+            cfg.db_path,
+            cfg.heartbeat_file,
+            cfg.platform,
+            cfg.account_name_pattern,
+            cfg.base_url,
+            cfg.admin_key,
+        )
         return
     if cfg.ui_enabled:
         from .ui import start_background
 
-        start_background(ui_host, ui_port, cfg.db_path, cfg.heartbeat_file, cfg.platform, cfg.account_name_pattern)
+        start_background(
+            ui_host,
+            ui_port,
+            cfg.db_path,
+            cfg.heartbeat_file,
+            cfg.platform,
+            cfg.account_name_pattern,
+            cfg.base_url,
+            cfg.admin_key,
+        )
         logging.getLogger(__name__).info("dashboard listening on %s:%s", ui_host, ui_port)
     run(cfg, once=args.once)
 

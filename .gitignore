@@ -1,6 +1,28 @@
+# Python / uv
 __pycache__/
-*.pyc
-.venv/
+*.py[cod]
+*$py.class
+.python-version
+**/.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+**/dist/
+**/build/
+*.egg-info/
+
+# Node / Vue
+node_modules/
+*.tsbuildinfo
+.vite/
+coverage/
+
+# Local runtime data
 data/
 .env
-.pytest_cache/
+.env.*
+
+# Generated frontend bundle embedded in the Python package
+backend/src/scheduler/frontend/

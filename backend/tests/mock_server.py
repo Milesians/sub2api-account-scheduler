@@ -1,4 +1,4 @@
-"""本地 mock sub2api：python tests/mock_server.py [port]，配合 --once 做端到端验证。
+"""本地 mock sub2api：python backend/tests/mock_server.py [port]，配合 --once 做端到端验证。
 
 list 接口按 platform 查询参数返回 anthropic 或 openai 账号集。
 """
@@ -98,6 +98,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         parts = url.path.strip("/").split("/")
+        # /api/v1/admin/accounts/:id/codex/invite-reset/status
+        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "status"]:
+            self._send({
+                "available_count": 1,
+                "credits": [
+                    {
+                        "id": "credit-demo",
+                        "status": "available",
+                        "title": "Codex demo reset",
+                        "description": "Mock credit for local UI testing",
+                    }
+                ],
+                "eligibility_rules": ["账号需要支持 Codex OAuth", "每次最多邀请 5 个邮箱"],
+                "requires_consent": True,
+            })
+            return
         # /api/v1/admin/accounts/:id/usage
         if len(parts) == 6 and parts[-1] == "usage":
             self._send(PROBE_RESPONSES.get(parts[-2], {"source": "active"}))
@@ -114,6 +130,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
+        url = urlparse(self.path)
+        parts = url.path.strip("/").split("/")
+        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "invite"]:
+            self._send({"invites": [{"email": email} for email in payload.get("emails", [])]})
+            return
+        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "consume"]:
+            self._send({"code": "reset", "credit_id": payload.get("credit_id"), "available_count": 0})
+            return
         print(f"BULK-UPDATE: {payload}", flush=True)
         self._send({"updated": len(payload.get("account_ids", []))})
 

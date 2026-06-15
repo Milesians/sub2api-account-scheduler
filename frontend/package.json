@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "build": "vue-tsc -b && vite build",
+    "dev": "vite --host 0.0.0.0"
+  },
+  "dependencies": {
+    "vue": "^3.5.25"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7",
+    "vue-tsc": "^3.1.8"
+  }
+}

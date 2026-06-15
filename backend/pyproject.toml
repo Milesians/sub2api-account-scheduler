@@ -17,3 +17,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "scheduler"
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

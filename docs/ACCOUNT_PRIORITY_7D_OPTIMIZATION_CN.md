@@ -585,25 +585,28 @@ state_retention_days: 30       # 账号消失后 account_state 行保留期
 
 ```text
 sub2api-account-scheduler/
-├── pyproject.toml
-├── uv.lock
 ├── config.yaml              # 策略参数（即「推荐参数」，非敏感）
 ├── .env.example             # SUB2API_BASE_URL / SUB2API_ADMIN_KEY
 ├── Dockerfile
 ├── docker-compose.yml
 ├── docs/
-├── src/scheduler/
-│   ├── __init__.py
-│   ├── __main__.py          # python -m scheduler [--once|--migrate-db] [--config PATH]
-│   ├── models.py            # AccountSnapshot / AccountState / Decision
-│   ├── config.py            # 加载 config.yaml，env 覆盖
-│   ├── api.py               # Admin API 客户端（list / active 探测 / bulk-update）
-│   ├── store.py             # SQLite：建表、状态读写、采样、决策日志、老化
-│   ├── policy.py            # 档位决策纯函数（无 IO）
-│   └── runner.py            # tick 编排、主循环、心跳
-└── tests/
-    ├── test_policy.py
-    └── mock_server.py       # 本地联调用 mock sub2api
+├── backend/
+│   ├── pyproject.toml
+│   ├── uv.lock
+│   ├── src/scheduler/
+│   │   ├── __init__.py
+│   │   ├── __main__.py      # python -m scheduler [--once|--migrate-db] [--config PATH]
+│   │   ├── models.py        # AccountSnapshot / AccountState / Decision
+│   │   ├── config.py        # 加载 config.yaml，env 覆盖
+│   │   ├── api.py           # Admin API 客户端（list / active 探测 / bulk-update）
+│   │   ├── store.py         # SQLite：建表、状态读写、采样、决策日志、老化
+│   │   ├── policy.py        # 档位决策纯函数（无 IO）
+│   │   ├── runner.py        # tick 编排、主循环、心跳
+│   │   └── ui.py            # 看板 API、邀请管理代理、前端静态文件托管
+│   └── tests/
+│       ├── test_policy.py
+│       └── mock_server.py   # 本地联调用 mock sub2api
+└── frontend/                # Vue/Vite 看板前端
 ```
 
 `policy.py` 保持纯函数：输入账号快照 + 历史状态 + 配置 + now，输出目标
@@ -787,37 +790,45 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "scheduler"
+module-root = "backend/src"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
 ```
 
 本地开发：
 
 ```bash
-uv sync                                                  # 安装依赖（含 dev）
-DB_PATH=./data/scheduler.db uv run python -m scheduler --once   # 本地单轮（直接生效）
-uv run pytest                                            # policy 单测
+uv --project backend sync
+DB_PATH=./data/scheduler.db uv --project backend run python -m scheduler --once
+uv --project backend run pytest
 ```
 
-联调可用 `tests/mock_server.py` 模拟 sub2api（含名称过滤、冷账号探测、
+联调可用 `backend/tests/mock_server.py` 模拟 sub2api（含名称过滤、冷账号探测、
 bulk-update 回显）：
 
 ```bash
-uv run python tests/mock_server.py 18923 &
+uv --project backend run python backend/tests/mock_server.py 18923 &
 SUB2API_BASE_URL=http://127.0.0.1:18923 SUB2API_ADMIN_KEY=test \
   DB_PATH=./data/dev.db HEARTBEAT_FILE=./data/last_tick \
-  uv run python -m scheduler --once
+  uv --project backend run python -m scheduler --once
 ```
 
 ### Docker 部署
 
-`Dockerfile`（多阶段：构建层用 uv，运行层纯 Python）：
+`Dockerfile`（多阶段：先构建 Vue 前端，再构建 Python 后端，运行层仍是单个 Python 服务）：
 
 ```dockerfile
+FROM node:22-bookworm-slim AS frontend-builder
+# npm ci && npm run build
+
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
-WORKDIR /app
+WORKDIR /app/backend
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-COPY pyproject.toml uv.lock ./
+COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
-COPY src/ src/
+COPY backend/src/ src/
+COPY --from=frontend-builder /app/backend/src/scheduler/frontend src/scheduler/frontend
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm
