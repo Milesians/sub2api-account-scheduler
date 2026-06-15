@@ -476,6 +476,8 @@ def snapshot(
               s.cooldown_until,
               s.probe_failures,
               s.updated_at,
+              COALESCE(c.paused, 0) AS scheduler_paused,
+              c.updated_at AS scheduler_control_updated_at,
               p.email,
               p.subscription_plan,
               p.subscription_status,
@@ -499,6 +501,7 @@ def snapshot(
               d.remaining_hours,
               d.decided_at AS last_decided_at
             FROM account_state s
+            LEFT JOIN account_control c ON c.account_id = s.account_id
             LEFT JOIN account_profile_cache p ON p.account_id = s.account_id
             LEFT JOIN (
               SELECT *
@@ -580,6 +583,8 @@ def _handler(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            if self._handle_scheduler_control_post(parsed.path):
+                return
             if self._handle_invite_reset_post(parsed.path, invite):
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -600,6 +605,33 @@ def _handler(
                 self._send_json(HTTPStatus(e.status), {"error": str(e)})
             except Exception as e:
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
+            return True
+
+        def _handle_scheduler_control_post(self, path: str) -> bool:
+            account_id = _parse_scheduler_control_path(path)
+            if account_id is None:
+                return False
+            try:
+                payload = self._read_json()
+                if "paused" not in payload:
+                    raise ValueError("paused is required")
+                paused = payload["paused"]
+                if not isinstance(paused, bool):
+                    raise ValueError("paused must be a boolean")
+                store = Store(db_path)
+                try:
+                    control = store.set_account_paused(account_id, paused, datetime.now(UTC))
+                finally:
+                    store.close()
+                self._send_json(HTTPStatus.OK, {
+                    "account_id": control.account_id,
+                    "scheduler_paused": control.paused,
+                    "scheduler_control_updated_at": _iso(control.updated_at),
+                })
+            except ValueError as e:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+            except Exception as e:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(e)})
             return True
 
         def _handle_invite_reset_post(self, path: str, invite: CodexInviteReset | None) -> bool:
@@ -682,6 +714,16 @@ def _parse_invite_reset_path(path: str) -> tuple[int | None, str]:
         return int(parts[2]), parts[5]
     except ValueError:
         return None, ""
+
+
+def _parse_scheduler_control_path(path: str) -> int | None:
+    parts = path.strip("/").split("/")
+    if len(parts) != 4 or parts[:2] != ["api", "accounts"] or parts[3] != "scheduler-control":
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
 
 
 def _static_path(path: str) -> Path | None:

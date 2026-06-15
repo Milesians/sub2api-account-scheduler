@@ -19,6 +19,8 @@ interface DashboardAccount {
   subscription_expires_at: string | null
   profile_updated_at: string | null
   subscription_error: string | null
+  scheduler_paused: number | boolean | null
+  scheduler_control_updated_at: string | null
   last_priority: number | null
   last_current_priority: number | null
   last_target_priority: number | null
@@ -98,6 +100,7 @@ interface InviteStatus {
 const snapshot = ref<Snapshot | null>(null)
 const error = ref('')
 const loading = ref(false)
+const controlLoading = ref<number | null>(null)
 const inviteOpen = ref(false)
 const inviteAccount = ref<DashboardAccount | null>(null)
 const inviteStatus = ref<InviteStatus | null>(null)
@@ -118,6 +121,8 @@ const availableCredits = computed(() => {
 const availableCount = computed(() => inviteStatus.value?.available_count ?? availableCredits.value.length)
 
 const accounts = computed(() => snapshot.value?.accounts ?? [])
+
+const pausedAccountCount = computed(() => accounts.value.filter((account) => isSchedulerPaused(account)).length)
 
 const behindAccountCount = computed(() => {
   return accounts.value.filter((account) => (account.expected_7d_gap ?? 0) > 0.5).length
@@ -216,6 +221,10 @@ function subscriptionClass(account: DashboardAccount) {
   return ''
 }
 
+function isSchedulerPaused(account: DashboardAccount) {
+  return account.scheduler_paused === true || account.scheduler_paused === 1
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     cache: 'no-store',
@@ -238,6 +247,23 @@ async function loadSnapshot() {
     error.value = e instanceof Error ? e.message : '读取失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function toggleScheduler(account: DashboardAccount) {
+  if (controlLoading.value !== null) return
+  controlLoading.value = account.account_id
+  error.value = ''
+  try {
+    await requestJson(`/api/accounts/${account.account_id}/scheduler-control`, {
+      method: 'POST',
+      body: JSON.stringify({ paused: !isSchedulerPaused(account) })
+    })
+    await loadSnapshot()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '更新调度状态失败'
+  } finally {
+    controlLoading.value = null
   }
 }
 
@@ -382,7 +408,7 @@ onMounted(() => {
       <div class="metric">
         <div class="label">受控账号</div>
         <div class="value">{{ snapshot?.summary.account_count ?? '-' }}</div>
-        <div class="sub">页面刷新 {{ fmtTime(snapshot?.generated_at) }}</div>
+        <div class="sub">暂停 {{ pausedAccountCount }} / 页面刷新 {{ fmtTime(snapshot?.generated_at) }}</div>
       </div>
       <div class="metric">
         <div class="label">目标差距</div>
@@ -433,7 +459,10 @@ onMounted(() => {
           <tbody>
             <tr v-for="account in accounts" :key="account.account_id">
               <td class="name-cell">
-                <div class="name">{{ account.name || '-' }}</div>
+                <div class="name-line">
+                  <span class="name">{{ account.name || '-' }}</span>
+                  <span v-if="isSchedulerPaused(account)" class="pause-badge">已暂停</span>
+                </div>
                 <div class="cell-sub email-line">{{ account.email || '邮箱未知' }}</div>
                 <div class="cell-sub">#{{ account.account_id }}</div>
               </td>
@@ -480,6 +509,14 @@ onMounted(() => {
               <td>{{ fmtTime(account.last_sampled_at) }}</td>
               <td><span :class="['reason', reasonClass(account.last_reason)]">{{ account.last_reason || '-' }}</span></td>
               <td class="actions">
+                <button
+                  type="button"
+                  class="small"
+                  :disabled="controlLoading !== null"
+                  @click="toggleScheduler(account)"
+                >
+                  {{ controlLoading === account.account_id ? '处理中' : (isSchedulerPaused(account) ? '启动调度' : '暂停调度') }}
+                </button>
                 <button type="button" class="small" @click="openInvite(account)">邀请管理</button>
               </td>
             </tr>

@@ -22,6 +22,22 @@ def test_store_migrates_and_persists_new_state_fields(tmp_path):
         store.close()
 
 
+def test_store_persists_account_control(tmp_path):
+    store = Store(str(tmp_path / "scheduler.db"))
+    try:
+        control = store.set_account_paused(7, True, NOW)
+        assert control.paused is True
+
+        loaded = store.load_account_controls([7])[7]
+        assert loaded.paused is True
+        assert loaded.updated_at == NOW
+
+        store.set_account_paused(7, False, NOW + timedelta(minutes=1))
+        assert store.load_account_controls([7])[7].paused is False
+    finally:
+        store.close()
+
+
 def test_attach_recent_5h_burn_from_usage_samples(tmp_path):
     store = Store(str(tmp_path / "scheduler.db"))
     try:

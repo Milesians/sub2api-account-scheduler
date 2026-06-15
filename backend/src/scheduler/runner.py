@@ -45,11 +45,13 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
         s for s in snaps
         if s.type in managed_types and _name_matches(cfg.account_name_pattern, s.name)
     ]
-    eligible = [s for s in managed if s.eligible]
-    _sync_account_profiles(eligible, raw_accounts, store, cfg, api, now)
+    controls = store.load_account_controls([s.id for s in managed])
+    paused_ids = {account_id for account_id, control in controls.items() if control.paused}
+    eligible = [s for s in managed if s.eligible and s.id not in paused_ids]
+    _sync_account_profiles(managed, raw_accounts, store, cfg, api, now)
     log.info(
-        "run=%s accounts total=%d managed=%d eligible=%d",
-        run_id, len(snaps), len(managed), len(eligible),
+        "run=%s accounts total=%d managed=%d eligible=%d paused=%d",
+        run_id, len(snaps), len(managed), len(eligible), len(paused_ids),
     )
 
     probed = _probe_stale(eligible, states, cfg, api, now)
@@ -82,6 +84,7 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
                 if account_id in new_states:
                     new_states[account_id].last_priority = None
 
+    _save_managed_states(managed, states, new_states, now)
     store.save_states(list(new_states.values()), now)
     store.add_samples(eligible, decisions)
     store.add_decisions(run_id, decisions, now)
@@ -120,6 +123,24 @@ def _probe_stale(
         else:
             state.probe_failures += 1
     return probed
+
+
+def _save_managed_states(
+    managed: list[AccountSnapshot],
+    states: dict[int, AccountState],
+    new_states: dict[int, AccountState],
+    now: datetime,
+) -> None:
+    for snap in managed:
+        if snap.id in new_states:
+            continue
+        state = states.get(snap.id) or AccountState(account_id=snap.id)
+        state.last_priority = snap.priority
+        state.last_7d_used = snap.seven_day_used
+        state.last_5h_used = snap.five_hour_used
+        state.last_7d_reset_at = snap.seven_day_reset_at
+        state.last_sampled_at = snap.sampled_at or now
+        new_states[snap.id] = state
 
 
 def _sync_account_profiles(

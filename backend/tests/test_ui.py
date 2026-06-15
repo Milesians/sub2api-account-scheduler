@@ -39,6 +39,7 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             subscription_expires_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
         )
     ], NOW)
+    store.set_account_paused(7, True, NOW)
     store.add_decisions("run-1", [
         Decision(
             account_id=7,
@@ -71,6 +72,8 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["accounts"][0]["subscription_plan"] == "plus"
     assert data["accounts"][0]["subscription_status"] == "active"
     assert data["accounts"][0]["subscription_expires_at"] == "2026-07-01T00:00:00Z"
+    assert data["accounts"][0]["scheduler_paused"] == 1
+    assert data["accounts"][0]["scheduler_control_updated_at"] == "2026-06-12T10:00:00Z"
     assert data["accounts"][0]["last_7d_reset_at"] == "2026-06-15T22:00:00Z"
     assert data["accounts"][0]["expected_7d_used"] == 55.0
     assert data["accounts"][0]["expected_7d_gap"] == 13.0
@@ -102,6 +105,35 @@ def test_start_background_serves_snapshot(tmp_path):
             data = json.loads(resp.read().decode("utf-8"))
         assert data["config"]["platform"] == "openai"
         assert data["config"]["account_name_pattern"] == r"pay\d+"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_scheduler_control_route_toggles_paused(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    try:
+        host, port = server.server_address
+        req = Request(
+            f"http://{host}:{port}/api/accounts/7/scheduler-control",
+            data=json.dumps({"paused": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assert data["account_id"] == 7
+        assert data["scheduler_paused"] is True
+
+        store = Store(str(db))
+        try:
+            assert store.load_account_controls([7])[7].paused is True
+        finally:
+            store.close()
     finally:
         server.shutdown()
         server.server_close()

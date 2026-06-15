@@ -9,9 +9,9 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import AccountProfile, AccountSnapshot, AccountState, Decision
+from .models import AccountControl, AccountProfile, AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS account_profile_cache (
     subscription_expires_at  TEXT,
     subscription_error       TEXT,
     updated_at               TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_control (
+    account_id  INTEGER PRIMARY KEY,
+    paused      INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage_sample (
@@ -148,6 +154,13 @@ MIGRATIONS = {
            subscription_expires_at  TEXT,
            subscription_error       TEXT,
            updated_at               TEXT NOT NULL
+       );
+       """,
+    6: """
+       CREATE TABLE IF NOT EXISTS account_control (
+           account_id  INTEGER PRIMARY KEY,
+           paused      INTEGER NOT NULL DEFAULT 0,
+           updated_at  TEXT NOT NULL
        );
        """,
 }
@@ -327,6 +340,38 @@ class Store:
             ],
         )
         self.conn.commit()
+
+    def load_account_controls(self, account_ids: list[int] | None = None) -> dict[int, AccountControl]:
+        if account_ids is None:
+            rows = self.conn.execute("SELECT * FROM account_control").fetchall()
+        elif not account_ids:
+            return {}
+        else:
+            placeholders = ",".join("?" for _ in account_ids)
+            rows = self.conn.execute(
+                f"SELECT * FROM account_control WHERE account_id IN ({placeholders})",
+                tuple(account_ids),
+            ).fetchall()
+        return {
+            int(r["account_id"]): AccountControl(
+                account_id=int(r["account_id"]),
+                paused=bool(r["paused"]),
+                updated_at=_from_iso(r["updated_at"]),
+            )
+            for r in rows
+        }
+
+    def set_account_paused(self, account_id: int, paused: bool, now: datetime) -> AccountControl:
+        self.conn.execute(
+            """INSERT INTO account_control (account_id, paused, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(account_id) DO UPDATE SET
+                 paused=excluded.paused,
+                 updated_at=excluded.updated_at""",
+            (account_id, 1 if paused else 0, _iso(now)),
+        )
+        self.conn.commit()
+        return AccountControl(account_id=account_id, paused=paused, updated_at=now)
 
     def add_samples(self, snaps: list[AccountSnapshot], decisions: list[Decision] | None = None) -> None:
         """记录有用量数据的快照；(account_id, sampled_at) 主键天然去重 stale 重复。"""

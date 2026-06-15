@@ -69,6 +69,15 @@ class AccountProfile:
 
 
 @dataclass
+class AccountControl:
+    """本项目内的账号控制开关，不写回 sub2api。"""
+
+    account_id: int
+    paused: bool = False
+    updated_at: datetime | None = None
+
+
+@dataclass
 class AccountState:
     """每账号控制状态，持久化在 account_state 表。"""
 
