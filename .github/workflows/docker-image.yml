@@ -48,6 +48,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -57,4 +59,5 @@ jobs:
         with:
           package-name: ${{ github.event.repository.name }}
           package-type: container
+          delete-only-untagged-versions: true
           min-versions-to-keep: 1
