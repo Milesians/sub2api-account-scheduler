@@ -133,7 +133,12 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
             elif self.path == "/backend-api/wham/rate-limit-reset-credits":
                 body = {
                     "available_count": 1,
-                    "credits": [{"id": "credit-1", "status": "available", "title": "Reset"}],
+                    "credits": [{
+                        "id": "credit-1",
+                        "status": "available",
+                        "title": "Reset",
+                        "expires_at": "2026-06-20T12:30:00Z",
+                    }],
                 }
             else:
                 self.send_response(404)
@@ -187,6 +192,7 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
             data = json.loads(resp.read().decode("utf-8"))
         assert data["available_count"] == 1
         assert data["credits"][0]["id"] == "credit-1"
+        assert data["credits"][0]["expires_at"] == "2026-06-20T12:30:00Z"
 
         req = Request(
             f"http://{host}:{port}/api/accounts/7/codex/invite-reset/invite",

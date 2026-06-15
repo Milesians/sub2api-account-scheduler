@@ -251,11 +251,24 @@ def _normalize_credits(raw: dict[str, Any]) -> list[dict[str, Any]]:
             "status": _string(item.get("status")),
             "title": _string(item.get("title")),
             "description": _string(item.get("description")),
+            "expires_at": _credit_expires_at(item),
             "profile_user_id": _string(item.get("profile_user_id")),
             "profile_image_url": _string(item.get("profile_image_url")),
             "raw": item,
         })
     return credits
+
+
+def _credit_expires_at(raw: dict[str, Any]) -> str:
+    for key in ("expires_at", "expired_at", "expiration_time", "expiresAt", "expiredAt", "expirationTime"):
+        value = raw.get(key)
+        parsed = _parse_time(value)
+        if parsed is not None:
+            return parsed.isoformat().replace("+00:00", "Z")
+        text = _string(value)
+        if text:
+            return text
+    return ""
 
 
 def _normalize_rules(raw: dict[str, Any]) -> list[str]:

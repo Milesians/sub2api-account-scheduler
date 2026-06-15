@@ -63,6 +63,7 @@ interface InviteCredit {
   status?: string
   title?: string
   description?: string
+  expires_at?: string
 }
 
 interface InviteStatus {
@@ -413,7 +414,7 @@ onMounted(() => {
                 <select v-model="selectedCreditId" :disabled="inviteLoading || !availableCredits.length">
                   <option v-if="!availableCredits.length" value="">暂无可用机会</option>
                   <option v-for="(credit, index) in availableCredits" :key="credit.id" :value="credit.id">
-                    {{ credit.title || 'Codex 重置机会' }} #{{ index + 1 }}
+                    {{ credit.title || 'Codex 重置机会' }} #{{ index + 1 }} / 过期 {{ fmtTime(credit.expires_at) }}
                   </option>
                 </select>
               </label>
@@ -422,7 +423,7 @@ onMounted(() => {
               </button>
               <ul class="plain-list">
                 <li v-for="credit in availableCredits" :key="credit.id">
-                  {{ credit.title || 'Codex 重置机会' }}：{{ credit.description || credit.id }}
+                  {{ credit.title || 'Codex 重置机会' }}：{{ credit.description || credit.id }} / 过期 {{ fmtTime(credit.expires_at) }}
                 </li>
               </ul>
             </div>

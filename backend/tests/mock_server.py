@@ -113,6 +113,7 @@ class Handler(BaseHTTPRequestHandler):
                         "status": "available",
                         "title": "Codex demo reset",
                         "description": "Mock credit for local UI testing",
+                        "expires_at": "2026-06-20T12:30:00Z",
                     }
                 ],
             })
