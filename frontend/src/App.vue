@@ -110,6 +110,10 @@ const inviteMessageType = ref<'success' | 'error' | ''>('')
 const selectedCreditId = ref('')
 const emailInput = ref('')
 const consentConfirmed = ref(false)
+const passwordOpen = ref(false)
+const passwordInput = ref('')
+const passwordError = ref('')
+let passwordResolver: ((value: string | null) => void) | null = null
 
 const availableCredits = computed(() => {
   return (inviteStatus.value?.credits ?? []).filter((credit) => {
@@ -276,12 +280,14 @@ async function loadSnapshot() {
 
 async function toggleScheduler(account: DashboardAccount) {
   if (controlLoading.value !== null) return
+  const password = await requestSensitivePassword()
+  if (password === null) return
   controlLoading.value = account.account_id
   error.value = ''
   try {
     await requestJson(`/api/accounts/${account.account_id}/scheduler-control`, {
       method: 'POST',
-      body: JSON.stringify({ paused: !isSchedulerPaused(account) })
+      body: JSON.stringify({ paused: !isSchedulerPaused(account), sensitive_password: password })
     })
     await loadSnapshot()
   } catch (e) {
@@ -289,6 +295,34 @@ async function toggleScheduler(account: DashboardAccount) {
   } finally {
     controlLoading.value = null
   }
+}
+
+function requestSensitivePassword(): Promise<string | null> {
+  passwordOpen.value = true
+  passwordInput.value = ''
+  passwordError.value = ''
+  return new Promise((resolve) => {
+    passwordResolver = resolve
+  })
+}
+
+function confirmSensitivePassword() {
+  const password = passwordInput.value.trim()
+  if (!password) {
+    passwordError.value = '请输入二次密码'
+    return
+  }
+  passwordOpen.value = false
+  passwordResolver?.(password)
+  passwordResolver = null
+  passwordInput.value = ''
+}
+
+function cancelSensitivePassword() {
+  passwordOpen.value = false
+  passwordResolver?.(null)
+  passwordResolver = null
+  passwordInput.value = ''
 }
 
 function openInvite(account: DashboardAccount) {
@@ -355,10 +389,12 @@ async function sendInvite() {
     if ((inviteStatus.value?.requires_consent ?? true) && !consentConfirmed.value) {
       throw new Error('请先确认已获得收件人同意')
     }
+    const password = await requestSensitivePassword()
+    if (password === null) return
     inviteLoading.value = true
     const result = await requestJson<{ failed_emails?: string[]; message?: string }>(
       `/api/accounts/${inviteAccount.value.account_id}/codex/invite-reset/invite`,
-      { method: 'POST', body: JSON.stringify({ emails }) }
+      { method: 'POST', body: JSON.stringify({ emails, sensitive_password: password }) }
     )
     const failed = result.failed_emails?.filter(Boolean) ?? []
     if (failed.length) {
@@ -376,11 +412,13 @@ async function sendInvite() {
 
 async function consumeCredit() {
   if (!inviteAccount.value || !selectedCreditId.value || inviteLoading.value) return
+  const password = await requestSensitivePassword()
+  if (password === null) return
   inviteLoading.value = true
   try {
     const result = await requestJson<{ code?: string }>(
       `/api/accounts/${inviteAccount.value.account_id}/codex/invite-reset/consume`,
-      { method: 'POST', body: JSON.stringify({ credit_id: selectedCreditId.value }) }
+      { method: 'POST', body: JSON.stringify({ credit_id: selectedCreditId.value, sensitive_password: password }) }
     )
     const ok = !result.code || result.code === 'reset'
     setInviteMessage(ok ? 'success' : 'error', inviteConsumeMessage(result.code))
@@ -680,6 +718,36 @@ onMounted(() => {
               </div>
             </div>
           </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="passwordOpen" class="modal-backdrop compact" @click.self="cancelSensitivePassword">
+    <div class="password-modal" role="dialog" aria-modal="true" aria-labelledby="password-title">
+      <div class="modal-head">
+        <div>
+          <h2 id="password-title">二次验证</h2>
+          <div class="hint">敏感操作需要输入密码</div>
+        </div>
+        <button type="button" @click="cancelSensitivePassword">关闭</button>
+      </div>
+      <div class="modal-body">
+        <label>
+          <span class="field-label">操作密码</span>
+          <input
+            v-model="passwordInput"
+            class="password-input"
+            type="password"
+            autocomplete="current-password"
+            autofocus
+            @keydown.enter="confirmSensitivePassword"
+          >
+        </label>
+        <div v-if="passwordError" class="field-error">{{ passwordError }}</div>
+        <div class="modal-actions">
+          <button type="button" @click="cancelSensitivePassword">取消</button>
+          <button type="button" class="primary-action" @click="confirmSensitivePassword">确认</button>
         </div>
       </div>
     </div>

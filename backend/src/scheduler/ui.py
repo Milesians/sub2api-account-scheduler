@@ -9,6 +9,7 @@ import argparse
 import json
 import mimetypes
 import os
+import secrets
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from .codex_invite import CodexInviteReset, InviteResetError
 from .store import Store
 
 STATIC_DIR = Path(__file__).with_name("frontend")
+DEFAULT_SENSITIVE_ACTION_PASSWORD = "123456"
 
 
 HTML = """<!doctype html>
@@ -613,6 +615,7 @@ def _handler(
                 return False
             try:
                 payload = self._read_json()
+                _verify_sensitive_password(payload)
                 if "paused" not in payload:
                     raise ValueError("paused is required")
                 paused = payload["paused"]
@@ -643,6 +646,7 @@ def _handler(
                 return True
             try:
                 payload = self._read_json()
+                _verify_sensitive_password(payload)
                 if action == "invite":
                     self._send_json(HTTPStatus.OK, invite.send_invite(account_id, payload.get("emails") or []))
                     return True
@@ -724,6 +728,13 @@ def _parse_scheduler_control_path(path: str) -> int | None:
         return int(parts[2])
     except ValueError:
         return None
+
+
+def _verify_sensitive_password(payload: dict[str, Any]) -> None:
+    expected = os.environ.get("SENSITIVE_ACTION_PASSWORD") or DEFAULT_SENSITIVE_ACTION_PASSWORD
+    provided = payload.get("sensitive_password")
+    if not isinstance(provided, str) or not secrets.compare_digest(provided, expected):
+        raise ValueError("敏感操作密码错误")
 
 
 def _static_path(path: str) -> Path | None:

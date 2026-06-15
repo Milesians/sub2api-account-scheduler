@@ -120,7 +120,7 @@ def test_scheduler_control_route_toggles_paused(tmp_path):
         host, port = server.server_address
         req = Request(
             f"http://{host}:{port}/api/accounts/7/scheduler-control",
-            data=json.dumps({"paused": True}).encode(),
+            data=json.dumps({"paused": True, "sensitive_password": "123456"}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -134,6 +134,33 @@ def test_scheduler_control_route_toggles_paused(tmp_path):
             assert store.load_account_controls([7])[7].paused is True
         finally:
             store.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_sensitive_post_rejects_wrong_password(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    try:
+        host, port = server.server_address
+        req = Request(
+            f"http://{host}:{port}/api/accounts/7/scheduler-control",
+            data=json.dumps({"paused": True, "sensitive_password": "bad"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(req, timeout=2)
+        except HTTPError as e:
+            data = json.loads(e.read().decode("utf-8"))
+            assert e.code == 400
+            assert data["error"] == "敏感操作密码错误"
+        else:
+            raise AssertionError("expected HTTPError")
     finally:
         server.shutdown()
         server.server_close()
@@ -250,7 +277,10 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
 
         req = Request(
             f"http://{host}:{port}/api/accounts/7/codex/invite-reset/invite",
-            data=json.dumps({"emails": ["a@example.com b@example.com", "A@example.com"]}).encode(),
+            data=json.dumps({
+                "emails": ["a@example.com b@example.com", "A@example.com"],
+                "sensitive_password": "123456",
+            }).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -260,7 +290,7 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
 
         req = Request(
             f"http://{host}:{port}/api/accounts/7/codex/invite-reset/consume",
-            data=json.dumps({"credit_id": "credit-1"}).encode(),
+            data=json.dumps({"credit_id": "credit-1", "sensitive_password": "123456"}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
