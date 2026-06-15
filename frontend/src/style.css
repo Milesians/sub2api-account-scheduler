@@ -234,7 +234,7 @@ table {
 }
 
 .account-table table {
-  min-width: 1260px;
+  min-width: 1380px;
 }
 
 th,
@@ -262,7 +262,7 @@ tbody tr:hover {
 }
 
 .name-cell {
-  min-width: 130px;
+  min-width: 170px;
 }
 
 .name {
@@ -272,6 +272,40 @@ tbody tr:hover {
 
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+.email-line {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subscription-column {
+  min-width: 150px;
+}
+
+.subscription-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.subscription-cell strong {
+  font-weight: 740;
+}
+
+.subscription-cell span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.subscription-column.active strong,
+.subscription-column.free strong {
+  color: var(--good);
+}
+
+.subscription-column.expired strong,
+.subscription-error {
+  color: var(--bad);
 }
 
 .usage-cell {

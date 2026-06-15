@@ -5,7 +5,7 @@ import threading
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from scheduler.models import AccountState, Decision
+from scheduler.models import AccountProfile, AccountState, Decision
 from scheduler.store import Store
 from scheduler.ui import snapshot, start_background
 
@@ -28,6 +28,15 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             last_5h_used=12.0,
             last_sampled_at=NOW,
             hourly_burn_ewma=0.2,
+        )
+    ], NOW)
+    store.save_account_profiles([
+        AccountProfile(
+            account_id=7,
+            email="pay1@example.com",
+            subscription_plan="plus",
+            subscription_status="active",
+            subscription_expires_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
         )
     ], NOW)
     store.add_decisions("run-1", [
@@ -58,6 +67,10 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["summary"]["last_run_changed_count"] == 1
     assert data["heartbeat"]["exists"] is True
     assert data["accounts"][0]["name"] == "pay1"
+    assert data["accounts"][0]["email"] == "pay1@example.com"
+    assert data["accounts"][0]["subscription_plan"] == "plus"
+    assert data["accounts"][0]["subscription_status"] == "active"
+    assert data["accounts"][0]["subscription_expires_at"] == "2026-07-01T00:00:00Z"
     assert data["accounts"][0]["last_7d_reset_at"] == "2026-06-15T22:00:00Z"
     assert data["accounts"][0]["expected_7d_used"] == 55.0
     assert data["accounts"][0]["expected_7d_gap"] == 13.0

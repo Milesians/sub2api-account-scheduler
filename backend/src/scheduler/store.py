@@ -9,9 +9,9 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import AccountSnapshot, AccountState, Decision
+from .models import AccountProfile, AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS account_state (
     last_boost_at     TEXT,
     probe_failures    INTEGER NOT NULL DEFAULT 0,
     updated_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_profile_cache (
+    account_id               INTEGER PRIMARY KEY,
+    email                    TEXT,
+    subscription_plan        TEXT,
+    subscription_status      TEXT,
+    subscription_expires_at  TEXT,
+    subscription_error       TEXT,
+    updated_at               TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage_sample (
@@ -128,6 +138,17 @@ MIGRATIONS = {
        """,
     4: """
        ALTER TABLE decision_log ADD COLUMN seven_day_reset_at TEXT;
+       """,
+    5: """
+       CREATE TABLE IF NOT EXISTS account_profile_cache (
+           account_id               INTEGER PRIMARY KEY,
+           email                    TEXT,
+           subscription_plan        TEXT,
+           subscription_status      TEXT,
+           subscription_expires_at  TEXT,
+           subscription_error       TEXT,
+           updated_at               TEXT NOT NULL
+       );
        """,
 }
 
@@ -248,6 +269,61 @@ class Store:
                     _iso(now),
                 )
                 for s in states
+            ],
+        )
+        self.conn.commit()
+
+    def load_account_profiles(self, account_ids: list[int]) -> dict[int, AccountProfile]:
+        if not account_ids:
+            return {}
+        placeholders = ",".join("?" for _ in account_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM account_profile_cache
+            WHERE account_id IN ({placeholders})
+            """,
+            tuple(account_ids),
+        ).fetchall()
+        return {
+            int(r["account_id"]): AccountProfile(
+                account_id=int(r["account_id"]),
+                email=r["email"] or "",
+                subscription_plan=r["subscription_plan"] or "",
+                subscription_status=r["subscription_status"] or "",
+                subscription_expires_at=_from_iso(r["subscription_expires_at"]),
+                profile_updated_at=_from_iso(r["updated_at"]),
+                subscription_error=r["subscription_error"] or "",
+            )
+            for r in rows
+        }
+
+    def save_account_profiles(self, profiles: list[AccountProfile], now: datetime) -> None:
+        if not profiles:
+            return
+        self.conn.executemany(
+            """INSERT INTO account_profile_cache
+               (account_id, email, subscription_plan, subscription_status,
+                subscription_expires_at, subscription_error, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(account_id) DO UPDATE SET
+                 email=excluded.email,
+                 subscription_plan=excluded.subscription_plan,
+                 subscription_status=excluded.subscription_status,
+                 subscription_expires_at=excluded.subscription_expires_at,
+                 subscription_error=excluded.subscription_error,
+                 updated_at=excluded.updated_at""",
+            [
+                (
+                    p.account_id,
+                    p.email,
+                    p.subscription_plan,
+                    p.subscription_status,
+                    _iso(p.subscription_expires_at),
+                    p.subscription_error,
+                    _iso(now),
+                )
+                for p in profiles
             ],
         )
         self.conn.commit()

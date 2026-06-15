@@ -12,6 +12,13 @@ from pathlib import Path
 from .api import AdminAPI, merge_probe, parse_account
 from .config import Config
 from .models import AccountSnapshot, AccountState
+from .openai_subscription import (
+    OpenAISubscriptionClient,
+    apply_profile,
+    has_profile_value,
+    merge_profile,
+    profile_from_account_raw,
+)
 from .policy import decide
 from .store import Store
 
@@ -39,6 +46,7 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
         if s.type in managed_types and _name_matches(cfg.account_name_pattern, s.name)
     ]
     eligible = [s for s in managed if s.eligible]
+    _sync_account_profiles(eligible, raw_accounts, store, cfg, api, now)
     log.info(
         "run=%s accounts total=%d managed=%d eligible=%d",
         run_id, len(snaps), len(managed), len(eligible),
@@ -112,6 +120,64 @@ def _probe_stale(
         else:
             state.probe_failures += 1
     return probed
+
+
+def _sync_account_profiles(
+    snaps: list[AccountSnapshot],
+    raw_accounts: list[dict],
+    store: Store,
+    cfg: Config,
+    api: AdminAPI,
+    now: datetime,
+) -> None:
+    if cfg.platform != "openai" or not snaps:
+        return
+
+    by_id = {int(a["id"]): a for a in raw_accounts if a.get("id") is not None}
+    cached = store.load_account_profiles([s.id for s in snaps])
+    raw_profiles = {
+        s.id: profile_from_account_raw(s.id, by_id.get(s.id, {}))
+        for s in snaps
+    }
+
+    seed_profiles = []
+    for snap in snaps:
+        merged = merge_profile(cached.get(snap.id), raw_profiles[snap.id])
+        if has_profile_value(merged):
+            apply_profile(snap, merged)
+        if has_profile_value(raw_profiles[snap.id]) and snap.id not in cached:
+            seed_profiles.append(raw_profiles[snap.id])
+    store.save_account_profiles(seed_profiles, now)
+
+    if not cfg.account_profile_refresh_enabled:
+        return
+
+    ttl = timedelta(minutes=max(1, cfg.account_profile_ttl_minutes))
+    stale = [
+        s for s in snaps
+        if s.id not in cached
+        or cached[s.id].profile_updated_at is None
+        or now - cached[s.id].profile_updated_at > ttl
+        or (
+            cached[s.id].subscription_expires_at is None
+            and cached[s.id].subscription_plan.lower() != "free"
+        )
+    ]
+    if not stale:
+        return
+
+    client = OpenAISubscriptionClient(api, cfg.openai_subscription_base_url)
+    refreshed = []
+    for snap in stale:
+        try:
+            profile = client.fetch(snap.id, now)
+        except Exception as e:
+            log.warning("OpenAI subscription fetch failed account_id=%s: %s", snap.id, e)
+            continue
+        merged = merge_profile(cached.get(snap.id), profile)
+        apply_profile(snap, merged)
+        refreshed.append(merged)
+    store.save_account_profiles(refreshed, now)
 
 
 def _name_matches(pattern: str, name: str) -> bool:

@@ -13,6 +13,12 @@ interface Summary {
 interface DashboardAccount {
   account_id: number
   name: string
+  email: string | null
+  subscription_plan: string | null
+  subscription_status: string | null
+  subscription_expires_at: string | null
+  profile_updated_at: string | null
+  subscription_error: string | null
   last_priority: number | null
   last_current_priority: number | null
   last_target_priority: number | null
@@ -194,6 +200,20 @@ function priorityText(account: DashboardAccount) {
   const current = account.last_current_priority ?? account.last_priority
   const target = account.last_target_priority ?? account.last_priority
   return `${current ?? '-'} -> ${target ?? '-'}`
+}
+
+function subscriptionText(account: DashboardAccount) {
+  const plan = account.subscription_plan || '未知套餐'
+  const status = account.subscription_status || '未知状态'
+  return `${plan} / ${status}`
+}
+
+function subscriptionClass(account: DashboardAccount) {
+  const status = account.subscription_status?.toLowerCase() ?? ''
+  if (status === 'active') return 'active'
+  if (status === 'expired' || status === 'canceled' || status === 'cancelled') return 'expired'
+  if (status === 'free') return 'free'
+  return ''
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -397,6 +417,7 @@ onMounted(() => {
           <thead>
             <tr>
               <th>账号</th>
+              <th>官方订阅</th>
               <th>7d / 期望</th>
               <th>差距</th>
               <th>LF</th>
@@ -413,7 +434,15 @@ onMounted(() => {
             <tr v-for="account in accounts" :key="account.account_id">
               <td class="name-cell">
                 <div class="name">{{ account.name || '-' }}</div>
+                <div class="cell-sub email-line">{{ account.email || '邮箱未知' }}</div>
                 <div class="cell-sub">#{{ account.account_id }}</div>
+              </td>
+              <td :class="['subscription-column', subscriptionClass(account)]">
+                <div class="subscription-cell">
+                  <strong>{{ subscriptionText(account) }}</strong>
+                  <span>过期 {{ fmtTime(account.subscription_expires_at) }}</span>
+                  <span v-if="account.subscription_error" class="subscription-error">{{ account.subscription_error }}</span>
+                </div>
               </td>
               <td class="usage-cell">
                 <div class="usage-top">

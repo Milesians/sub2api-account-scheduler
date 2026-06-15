@@ -476,6 +476,12 @@ def snapshot(
               s.cooldown_until,
               s.probe_failures,
               s.updated_at,
+              p.email,
+              p.subscription_plan,
+              p.subscription_status,
+              p.subscription_expires_at,
+              p.updated_at AS profile_updated_at,
+              p.subscription_error,
               d.reason AS last_reason,
               d.current_priority AS last_current_priority,
               d.target_priority AS last_target_priority,
@@ -493,6 +499,7 @@ def snapshot(
               d.remaining_hours,
               d.decided_at AS last_decided_at
             FROM account_state s
+            LEFT JOIN account_profile_cache p ON p.account_id = s.account_id
             LEFT JOIN (
               SELECT *
               FROM decision_log

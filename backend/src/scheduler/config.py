@@ -55,6 +55,9 @@ class Config:
     state_retention_days: int = 30
 
     window_hours: float = 168.0
+    openai_subscription_base_url: str = "https://chatgpt.com/backend-api"
+    account_profile_ttl_minutes: int = 720
+    account_profile_refresh_enabled: bool = True
 
     @property
     def band_boost(self) -> int:
@@ -101,6 +104,18 @@ def load_config(path: str | None = None) -> Config:
     cfg.ui_enabled = _bool(os.environ.get("UI_ENABLED", cfg.ui_enabled))
     cfg.ui_host = os.environ.get("UI_HOST", cfg.ui_host)
     cfg.ui_port = int(os.environ.get("UI_PORT", cfg.ui_port))
+    cfg.openai_subscription_base_url = os.environ.get(
+        "OPENAI_SUBSCRIPTION_BASE_URL",
+        cfg.openai_subscription_base_url,
+    )
+    cfg.account_profile_ttl_minutes = int(os.environ.get(
+        "ACCOUNT_PROFILE_TTL_MINUTES",
+        cfg.account_profile_ttl_minutes,
+    ))
+    cfg.account_profile_refresh_enabled = _bool(os.environ.get(
+        "ACCOUNT_PROFILE_REFRESH_ENABLED",
+        cfg.account_profile_refresh_enabled,
+    ))
 
     if not cfg.base_url or not cfg.admin_key:
         raise ValueError("SUB2API_BASE_URL and SUB2API_ADMIN_KEY are required (env)")

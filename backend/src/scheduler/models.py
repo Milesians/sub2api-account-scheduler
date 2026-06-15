@@ -29,6 +29,12 @@ class AccountSnapshot:
     usage_source: str = "missing"  # passive / active / missing
     concurrency: int = 1
     load_factor: int | None = None
+    email: str = ""
+    subscription_plan: str = ""
+    subscription_status: str = ""
+    subscription_expires_at: datetime | None = None
+    profile_updated_at: datetime | None = None
+    subscription_error: str = ""
 
     @property
     def eligible(self) -> bool:
@@ -47,6 +53,19 @@ class AccountSnapshot:
     @property
     def effective_load_factor(self) -> int:
         return self.load_factor if self.load_factor is not None and self.load_factor > 0 else self.base_load_factor
+
+
+@dataclass
+class AccountProfile:
+    """账号展示用 profile，来自账号元数据和官方 OpenAI 订阅缓存。"""
+
+    account_id: int
+    email: str = ""
+    subscription_plan: str = ""
+    subscription_status: str = ""
+    subscription_expires_at: datetime | None = None
+    profile_updated_at: datetime | None = None
+    subscription_error: str = ""
 
 
 @dataclass
