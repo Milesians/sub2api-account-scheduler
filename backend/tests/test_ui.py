@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from scheduler.models import AccountState, Decision
@@ -313,3 +314,64 @@ def test_invite_reset_refreshes_expired_token_against_mock_admin(tmp_path):
         admin_server.server_close()
         codex_server.shutdown()
         codex_server.server_close()
+
+
+def test_invite_reset_upstream_failure_returns_json_424(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    class AdminHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "accounts": [{
+                        "name": "codex-01",
+                        "platform": "openai",
+                        "type": "oauth",
+                        "credentials": {
+                            "access_token": "fake-access-token",
+                            "expires_at": "2099-01-01T00:00:00Z",
+                        },
+                    }],
+                    "proxies": [],
+                },
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    admin_server = HTTPServer(("127.0.0.1", 0), AdminHandler)
+    threading.Thread(target=admin_server.serve_forever, daemon=True).start()
+    ui_server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        platform="openai",
+        base_url=f"http://127.0.0.1:{admin_server.server_address[1]}",
+        admin_key="secret",
+        codex_invite_base_url="http://127.0.0.1:9/backend-api",
+    )
+    try:
+        host, port = ui_server.server_address
+        req = Request(f"http://{host}:{port}/api/accounts/7/codex/invite-reset/status")
+        try:
+            urlopen(req, timeout=2)
+        except HTTPError as e:
+            data = json.loads(e.read().decode("utf-8"))
+            assert e.code == 424
+            assert "codex invite reset request failed" in data["error"]
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        ui_server.shutdown()
+        ui_server.server_close()
+        admin_server.shutdown()
+        admin_server.server_close()

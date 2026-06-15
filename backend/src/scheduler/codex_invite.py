@@ -14,6 +14,7 @@ from .api import AdminAPI
 REFERRAL_KEY = "codex_referral_persistent_invite"
 DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"
 DEFAULT_USER_AGENT = "Codex Desktop/0.0.0 (Linux; x86_64)"
+DEFAULT_TIMEOUT = 8.0
 MAX_EMAILS = 5
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -23,7 +24,7 @@ class InviteResetError(Exception):
 
 
 class InviteResetUpstreamError(InviteResetError):
-    status = 502
+    status = 424
 
 
 class CodexInviteReset:
@@ -31,7 +32,7 @@ class CodexInviteReset:
         self,
         admin_api: AdminAPI,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_TIMEOUT,
         session: requests.Session | None = None,
     ):
         self.admin_api = admin_api
