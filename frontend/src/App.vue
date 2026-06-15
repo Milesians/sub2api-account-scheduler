@@ -180,6 +180,30 @@ function reasonClass(reason: string | null | undefined) {
   return ''
 }
 
+const reasonLabels: Record<string, string> = {
+  normal: '正常调度',
+  boost: '强力补量',
+  boost_emergency_jump: '紧急补量',
+  mild_boost: '温和补量',
+  hard_cap_7d: '7天用量封顶保护',
+  hard_cap_5h: '5小时用量封顶保护',
+  protect_7d: '已达目标保护',
+  ahead_protect: '进度超前保护',
+  cooldown_hold: '冷却中保持保护',
+  new_cooldown: '触发冷却保护',
+  new_cooldown_will_hit_goal: '即将达标冷却',
+  no_data_hold: '无数据保持',
+  stale_hold: '数据过期保持',
+  invalid_reset_hold: '重置时间异常保持',
+  takeover: '首次接管归档',
+  behind: '进度落后',
+}
+
+function reasonText(reason: string | null | undefined) {
+  if (!reason) return '-'
+  return reasonLabels[reason] ?? `未知原因：${reason}`
+}
+
 function progressWidth(value: number | null | undefined) {
   const numeric = value === null || value === undefined ? 0 : Number(value)
   return `${Math.max(0, Math.min(100, numeric)).toFixed(2)}%`
@@ -507,7 +531,11 @@ onMounted(() => {
                 <div class="cell-sub">冷却 {{ fmtTime(account.cooldown_until) }}</div>
               </td>
               <td>{{ fmtTime(account.last_sampled_at) }}</td>
-              <td><span :class="['reason', reasonClass(account.last_reason)]">{{ account.last_reason || '-' }}</span></td>
+              <td>
+                <span :class="['reason', reasonClass(account.last_reason)]" :title="account.last_reason || ''">
+                  {{ reasonText(account.last_reason) }}
+                </span>
+              </td>
               <td class="actions">
                 <button
                   type="button"
@@ -572,7 +600,11 @@ onMounted(() => {
               </td>
               <td class="num">{{ fmtPct(decision.projected_end) }}</td>
               <td class="num">{{ fmtNum(decision.catchup_score) }}</td>
-              <td><span :class="['reason', reasonClass(decision.reason)]">{{ decision.reason || '-' }}</span></td>
+              <td>
+                <span :class="['reason', reasonClass(decision.reason)]" :title="decision.reason || ''">
+                  {{ reasonText(decision.reason) }}
+                </span>
+              </td>
               <td>{{ decision.usage_source || '-' }}</td>
             </tr>
           </tbody>
