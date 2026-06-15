@@ -14,6 +14,7 @@ htmlcov/
 *.egg-info/
 
 # Node / Vue
+**/node_modules/
 node_modules/
 *.tsbuildinfo
 .vite/
@@ -22,7 +23,5 @@ coverage/
 # Local runtime data
 data/
 .env
-.env.*
-
 # Generated frontend bundle embedded in the Python package
 backend/src/scheduler/frontend/
