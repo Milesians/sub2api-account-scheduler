@@ -37,11 +37,16 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             current_priority=100,
             target_priority=1050,
             current_load_factor=1,
-            target_load_factor=1,
+            target_load_factor=3,
             reason="takeover",
             seven_day_used=42.0,
             seven_day_reset_at=RESET,
             five_hour_used=12.0,
+            target_now=55.0,
+            projected_end=92.5,
+            required_rate=0.7,
+            recent_rate=0.4,
+            remaining_hours=84.0,
             usage_source="passive",
         )
     ], NOW)
@@ -54,6 +59,10 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["heartbeat"]["exists"] is True
     assert data["accounts"][0]["name"] == "pay1"
     assert data["accounts"][0]["last_7d_reset_at"] == "2026-06-15T22:00:00Z"
+    assert data["accounts"][0]["expected_7d_used"] == 55.0
+    assert data["accounts"][0]["expected_7d_gap"] == 13.0
+    assert data["accounts"][0]["last_current_load_factor"] == 1
+    assert data["accounts"][0]["last_target_load_factor"] == 3
     assert data["decisions"][0]["seven_day_reset_at"] == "2026-06-15T22:00:00Z"
     assert data["decisions"][0]["changed"] is True
 

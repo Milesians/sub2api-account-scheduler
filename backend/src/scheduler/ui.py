@@ -481,6 +481,16 @@ def snapshot(
               d.target_priority AS last_target_priority,
               d.current_load_factor AS last_current_load_factor,
               d.target_load_factor AS last_target_load_factor,
+              d.target_now AS expected_7d_used,
+              CASE
+                WHEN d.target_now IS NOT NULL AND s.last_7d_used IS NOT NULL
+                THEN d.target_now - s.last_7d_used
+                ELSE NULL
+              END AS expected_7d_gap,
+              d.projected_end AS projected_7d_end,
+              d.required_rate,
+              d.recent_rate,
+              d.remaining_hours,
               d.decided_at AS last_decided_at
             FROM account_state s
             LEFT JOIN (

@@ -7,13 +7,24 @@ interface Summary {
   last_decided_at: string | null
   last_run_decision_count: number
   last_run_changed_count: number
+  changed_account_count: number
 }
 
 interface DashboardAccount {
   account_id: number
   name: string
   last_priority: number | null
+  last_current_priority: number | null
+  last_target_priority: number | null
+  last_current_load_factor: number | null
+  last_target_load_factor: number | null
   last_7d_used: number | null
+  expected_7d_used: number | null
+  expected_7d_gap: number | null
+  projected_7d_end: number | null
+  required_rate: number | null
+  recent_rate: number | null
+  remaining_hours: number | null
   last_7d_reset_at: string | null
   last_5h_used: number | null
   last_sampled_at: string | null
@@ -32,6 +43,11 @@ interface Decision {
   target_load_factor: number | null
   reason: string | null
   seven_day_used: number | null
+  target_now: number | null
+  projected_end: number | null
+  required_rate: number | null
+  recent_rate: number | null
+  remaining_hours: number | null
   seven_day_reset_at: string | null
   five_hour_used: number | null
   catchup_score: number | null
@@ -95,12 +111,47 @@ const availableCredits = computed(() => {
 
 const availableCount = computed(() => inviteStatus.value?.available_count ?? availableCredits.value.length)
 
+const accounts = computed(() => snapshot.value?.accounts ?? [])
+
+const behindAccountCount = computed(() => {
+  return accounts.value.filter((account) => (account.expected_7d_gap ?? 0) > 0.5).length
+})
+
+const averageExpectedGap = computed(() => {
+  const gaps = accounts.value
+    .map((account) => account.expected_7d_gap)
+    .filter((value): value is number => value !== null && value !== undefined)
+  if (!gaps.length) return null
+  return gaps.reduce((sum, value) => sum + value, 0) / gaps.length
+})
+
+const loadFactorChangedCount = computed(() => {
+  return accounts.value.filter((account) => {
+    return account.last_current_load_factor !== account.last_target_load_factor
+  }).length
+})
+
 function fmtPct(value: number | null | undefined) {
   return value === null || value === undefined ? '-' : `${Number(value).toFixed(1)}%`
 }
 
 function fmtNum(value: number | null | undefined, digits = 2) {
   return value === null || value === undefined ? '-' : Number(value).toFixed(digits)
+}
+
+function fmtRate(value: number | null | undefined) {
+  return value === null || value === undefined ? '-' : `${Number(value).toFixed(2)}%/h`
+}
+
+function fmtHours(value: number | null | undefined) {
+  return value === null || value === undefined ? '-' : `${Number(value).toFixed(1)}h`
+}
+
+function fmtGap(value: number | null | undefined) {
+  if (value === null || value === undefined) return '-'
+  const abs = Math.abs(Number(value))
+  if (abs < 0.05) return '持平'
+  return value > 0 ? `差 ${abs.toFixed(1)}%` : `超 ${abs.toFixed(1)}%`
 }
 
 function fmtTime(value: string | null | undefined) {
@@ -116,6 +167,33 @@ function reasonClass(reason: string | null | undefined) {
   if (reason.includes('protect') || reason.includes('cap')) return 'protect'
   if (reason.includes('cooldown') || reason.includes('hot')) return 'hot'
   return ''
+}
+
+function progressWidth(value: number | null | undefined) {
+  const numeric = value === null || value === undefined ? 0 : Number(value)
+  return `${Math.max(0, Math.min(100, numeric)).toFixed(2)}%`
+}
+
+function gapClass(value: number | null | undefined) {
+  if (value === null || value === undefined) return ''
+  if (value > 0.5) return 'behind'
+  if (value < -0.5) return 'ahead'
+  return 'on-track'
+}
+
+function lfClass(account: DashboardAccount) {
+  const current = account.last_current_load_factor
+  const target = account.last_target_load_factor
+  if (current === null || current === undefined || target === null || target === undefined) return ''
+  if (target > current) return 'boost'
+  if (target < current) return 'protect'
+  return ''
+}
+
+function priorityText(account: DashboardAccount) {
+  const current = account.last_current_priority ?? account.last_priority
+  const target = account.last_target_priority ?? account.last_priority
+  return `${current ?? '-'} -> ${target ?? '-'}`
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -259,17 +337,21 @@ onMounted(() => {
 </script>
 
 <template>
-  <header>
+  <header class="site-head">
     <div class="wrap topbar">
-      <div>
-        <h1>sub2api 调度看板</h1>
-        <div class="hint">
-          {{ snapshot?.config.platform || '-' }} /
-          {{ snapshot?.config.account_name_pattern || '全部账号' }} /
-          {{ snapshot?.config.db_path || '-' }}
+      <div class="title-block">
+        <div class="eyebrow">sub2api account scheduler</div>
+        <h1>调度看板</h1>
+        <div class="hint config-line">
+          <span>{{ snapshot?.config.platform || '-' }}</span>
+          <span>{{ snapshot?.config.account_name_pattern || '全部账号' }}</span>
+          <span>{{ snapshot?.config.db_path || '-' }}</span>
+          <span>最近一轮 {{ snapshot?.summary.last_run_id || '-' }}</span>
         </div>
       </div>
-      <button type="button" :disabled="loading" @click="loadSnapshot">刷新</button>
+      <button type="button" class="primary-action" :disabled="loading" @click="loadSnapshot">
+        {{ loading ? '刷新中' : '刷新' }}
+      </button>
     </div>
   </header>
 
@@ -283,15 +365,16 @@ onMounted(() => {
         <div class="sub">页面刷新 {{ fmtTime(snapshot?.generated_at) }}</div>
       </div>
       <div class="metric">
-        <div class="label">最近一轮</div>
-        <div class="value">{{ snapshot?.summary.last_run_id || '-' }}</div>
-        <div class="sub">{{ fmtTime(snapshot?.summary.last_decided_at) }}</div>
+        <div class="label">目标差距</div>
+        <div class="value">{{ behindAccountCount }}</div>
+        <div class="sub">落后账号 / 平均 {{ fmtGap(averageExpectedGap) }}</div>
       </div>
       <div class="metric">
-        <div class="label">本轮调整</div>
-        <div class="value">{{ snapshot?.summary.last_run_changed_count ?? '-' }}</div>
+        <div class="label">LF 调整</div>
+        <div class="value">{{ loadFactorChangedCount }}</div>
         <div class="sub">
-          {{ snapshot?.summary.last_run_decision_count ? `共 ${snapshot.summary.last_run_decision_count} 条决策` : '-' }}
+          本轮 {{ snapshot?.summary.last_run_changed_count ?? '-' }} /
+          最新变更 {{ snapshot?.summary.changed_account_count ?? '-' }}
         </div>
       </div>
       <div class="metric">
@@ -301,38 +384,72 @@ onMounted(() => {
       </div>
     </div>
 
-    <section>
+    <section class="panel">
       <div class="section-head">
-        <h2>账号状态</h2>
+        <div>
+          <h2>账号状态</h2>
+          <div class="hint">实际 7d、期望用量与 LF 调整放在同一行对比</div>
+        </div>
         <div class="hint">按最近更新时间排序</div>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap account-table">
         <table>
           <thead>
             <tr>
               <th>账号</th>
+              <th>7d / 期望</th>
+              <th>差距</th>
+              <th>LF</th>
               <th>Priority</th>
-              <th>7d</th>
-              <th>7d 刷新</th>
               <th>5h</th>
-              <th>EWMA/h</th>
-              <th>Cooldown</th>
+              <th>预计 7d</th>
+              <th>重置 / 冷却</th>
               <th>采样</th>
               <th>最近原因</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="account in snapshot?.accounts ?? []" :key="account.account_id">
-              <td class="name">{{ account.name || '-' }} #{{ account.account_id }}</td>
-              <td class="num">{{ account.last_priority ?? '-' }}</td>
-              <td class="num">{{ fmtPct(account.last_7d_used) }}</td>
-              <td>{{ fmtTime(account.last_7d_reset_at) }}</td>
+            <tr v-for="account in accounts" :key="account.account_id">
+              <td class="name-cell">
+                <div class="name">{{ account.name || '-' }}</div>
+                <div class="cell-sub">#{{ account.account_id }}</div>
+              </td>
+              <td class="usage-cell">
+                <div class="usage-top">
+                  <strong>{{ fmtPct(account.last_7d_used) }}</strong>
+                  <span>期望 {{ fmtPct(account.expected_7d_used) }}</span>
+                </div>
+                <div class="usage-meter">
+                  <span class="usage-fill" :style="{ width: progressWidth(account.last_7d_used) }"></span>
+                  <i
+                    v-if="account.expected_7d_used !== null && account.expected_7d_used !== undefined"
+                    class="usage-marker"
+                    :style="{ left: progressWidth(account.expected_7d_used) }"
+                  ></i>
+                </div>
+              </td>
+              <td :class="['gap-column', gapClass(account.expected_7d_gap)]">
+                <div class="gap-cell">
+                  <strong>{{ fmtGap(account.expected_7d_gap) }}</strong>
+                  <span>{{ fmtHours(account.remaining_hours) }} 剩余</span>
+                </div>
+              </td>
+              <td :class="['num', 'lf-column', lfClass(account)]">
+                <div class="lf-cell">
+                  <strong>{{ account.last_current_load_factor ?? '-' }} -> {{ account.last_target_load_factor ?? '-' }}</strong>
+                  <span>需 {{ fmtRate(account.required_rate) }} / 近 {{ fmtRate(account.recent_rate) }}</span>
+                </div>
+              </td>
+              <td class="num">{{ priorityText(account) }}</td>
               <td class="num">{{ fmtPct(account.last_5h_used) }}</td>
-              <td class="num">{{ fmtNum(account.hourly_burn_ewma) }}</td>
-              <td>{{ fmtTime(account.cooldown_until) }}</td>
+              <td class="num">{{ fmtPct(account.projected_7d_end) }}</td>
+              <td>
+                <div>{{ fmtTime(account.last_7d_reset_at) }}</div>
+                <div class="cell-sub">冷却 {{ fmtTime(account.cooldown_until) }}</div>
+              </td>
               <td>{{ fmtTime(account.last_sampled_at) }}</td>
-              <td :class="reasonClass(account.last_reason)">{{ account.last_reason || '-' }}</td>
+              <td><span :class="['reason', reasonClass(account.last_reason)]">{{ account.last_reason || '-' }}</span></td>
               <td class="actions">
                 <button type="button" class="small" @click="openInvite(account)">邀请管理</button>
               </td>
@@ -340,13 +457,16 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
-      <div v-if="!snapshot?.accounts.length" class="empty">暂无账号状态</div>
+      <div v-if="snapshot && !accounts.length" class="empty">暂无账号状态</div>
     </section>
 
-    <section>
+    <section class="panel">
       <div class="section-head">
-        <h2>最近决策</h2>
-        <div class="hint">最多 80 条</div>
+        <div>
+          <h2>最近决策</h2>
+          <div class="hint">最近 80 条调度记录</div>
+        </div>
+        <div class="hint">{{ fmtTime(snapshot?.summary.last_decided_at) }}</div>
       </div>
       <div class="table-wrap">
         <table>
@@ -355,35 +475,44 @@ onMounted(() => {
               <th>时间</th>
               <th>账号</th>
               <th>Priority / LF</th>
-              <th>原因</th>
-              <th>7d</th>
-              <th>7d 刷新</th>
+              <th>7d / 期望</th>
               <th>5h</th>
+              <th>速率</th>
+              <th>预计 7d</th>
               <th>Catchup</th>
-              <th>Burn/h</th>
+              <th>原因</th>
               <th>来源</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="decision in snapshot?.decisions ?? []" :key="`${decision.account_id}-${decision.decided_at}`">
               <td>{{ fmtTime(decision.decided_at) }}</td>
-              <td class="name">{{ decision.account_name || '-' }} #{{ decision.account_id }}</td>
+              <td class="name-cell">
+                <div class="name">{{ decision.account_name || '-' }}</div>
+                <div class="cell-sub">#{{ decision.account_id }}</div>
+              </td>
               <td :class="['num', { changed: decision.changed }]">
                 {{ decision.current_priority ?? '-' }} -> {{ decision.target_priority ?? '-' }}
                 / LF {{ decision.current_load_factor ?? '-' }} -> {{ decision.target_load_factor ?? '-' }}
               </td>
-              <td><span :class="['reason', reasonClass(decision.reason)]">{{ decision.reason || '-' }}</span></td>
-              <td class="num">{{ fmtPct(decision.seven_day_used) }}</td>
-              <td>{{ fmtTime(decision.seven_day_reset_at) }}</td>
+              <td class="num">
+                <div>{{ fmtPct(decision.seven_day_used) }} / {{ fmtPct(decision.target_now) }}</div>
+                <div class="cell-sub">剩余 {{ fmtHours(decision.remaining_hours) }}</div>
+              </td>
               <td class="num">{{ fmtPct(decision.five_hour_used) }}</td>
+              <td class="num">
+                <div>需 {{ fmtRate(decision.required_rate) }}</div>
+                <div class="cell-sub">近 {{ fmtRate(decision.recent_rate) }}</div>
+              </td>
+              <td class="num">{{ fmtPct(decision.projected_end) }}</td>
               <td class="num">{{ fmtNum(decision.catchup_score) }}</td>
-              <td class="num">{{ fmtNum(decision.recent_hour_burn) }}</td>
+              <td><span :class="['reason', reasonClass(decision.reason)]">{{ decision.reason || '-' }}</span></td>
               <td>{{ decision.usage_source || '-' }}</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <div v-if="!snapshot?.decisions.length" class="empty">暂无决策记录</div>
+      <div v-if="snapshot && !snapshot.decisions.length" class="empty">暂无决策记录</div>
     </section>
   </main>
 
