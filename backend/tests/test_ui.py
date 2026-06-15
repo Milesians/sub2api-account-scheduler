@@ -84,26 +84,77 @@ def test_start_background_serves_snapshot(tmp_path):
         server.server_close()
 
 
-def test_invite_reset_proxy_forwards_to_admin_api(tmp_path):
+def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
     db = tmp_path / "scheduler.db"
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
-    seen = {}
+    admin_seen = []
+    codex_seen = []
 
     class AdminHandler(BaseHTTPRequestHandler):
         def do_GET(self):
-            seen["path"] = self.path
-            seen["key"] = self.headers.get("x-api-key")
+            admin_seen.append((self.path, self.headers.get("x-api-key")))
             body = {
                 "code": 0,
                 "message": "success",
                 "data": {
-                    "available_count": 1,
-                    "credits": [{"id": "credit-1", "status": "available"}],
-                    "eligibility_rules": ["rule"],
-                    "requires_consent": True,
+                    "accounts": [{
+                        "name": "codex-01",
+                        "platform": "openai",
+                        "type": "oauth",
+                        "credentials": {
+                            "access_token": "fake-access-token",
+                            "expires_at": "2099-01-01T00:00:00Z",
+                            "chatgpt_account_id": "chatgpt-account",
+                        },
+                    }],
+                    "proxies": [],
                 },
             }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_POST(self):
+            raise AssertionError("valid token must not trigger refresh")
+
+        def log_message(self, format, *args):
+            pass
+
+    class CodexHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            codex_seen.append((self.command, self.path, self.headers.get("Authorization"), self.headers.get("chatgpt-account-id")))
+            if self.path.startswith("/backend-api/referrals/invite/eligibility"):
+                body = {"requires_explicit_confirmation": True}
+            elif self.path.startswith("/backend-api/wham/referrals/eligibility_rules"):
+                body = {"rules": ["rule"]}
+            elif self.path == "/backend-api/wham/rate-limit-reset-credits":
+                body = {
+                    "available_count": 1,
+                    "credits": [{"id": "credit-1", "status": "available", "title": "Reset"}],
+                }
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            codex_seen.append((self.command, self.path, self.headers.get("Authorization"), payload))
+            if self.path == "/backend-api/wham/referrals/invite":
+                body = {"invites": [{"email": email} for email in payload["emails"]], "message": "ok"}
+            elif self.path == "/backend-api/wham/rate-limit-reset-credits/consume":
+                body = {"code": "reset", "available_count": 0}
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -115,6 +166,9 @@ def test_invite_reset_proxy_forwards_to_admin_api(tmp_path):
     admin_server = HTTPServer(("127.0.0.1", 0), AdminHandler)
     admin_thread = threading.Thread(target=admin_server.serve_forever, daemon=True)
     admin_thread.start()
+    codex_server = HTTPServer(("127.0.0.1", 0), CodexHandler)
+    codex_thread = threading.Thread(target=codex_server.serve_forever, daemon=True)
+    codex_thread.start()
     ui_server = start_background(
         "127.0.0.1",
         0,
@@ -123,6 +177,7 @@ def test_invite_reset_proxy_forwards_to_admin_api(tmp_path):
         platform="openai",
         base_url=f"http://127.0.0.1:{admin_server.server_address[1]}",
         admin_key="secret",
+        codex_invite_base_url=f"http://127.0.0.1:{codex_server.server_address[1]}/backend-api",
     )
     try:
         host, port = ui_server.server_address
@@ -130,10 +185,131 @@ def test_invite_reset_proxy_forwards_to_admin_api(tmp_path):
         with urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         assert data["available_count"] == 1
-        assert seen["path"] == "/api/v1/admin/accounts/7/codex/invite-reset/status"
-        assert seen["key"] == "secret"
+        assert data["credits"][0]["id"] == "credit-1"
+
+        req = Request(
+            f"http://{host}:{port}/api/accounts/7/codex/invite-reset/invite",
+            data=json.dumps({"emails": ["a@example.com b@example.com", "A@example.com"]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            invite_data = json.loads(resp.read().decode("utf-8"))
+        assert invite_data["message"] == "ok"
+
+        req = Request(
+            f"http://{host}:{port}/api/accounts/7/codex/invite-reset/consume",
+            data=json.dumps({"credit_id": "credit-1"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            consume_data = json.loads(resp.read().decode("utf-8"))
+        assert consume_data["code"] == "reset"
+        assert consume_data["redeem_request_id"]
+
+        assert all(item[1] == "secret" for item in admin_seen)
+        assert admin_seen[0][0].startswith("/api/v1/admin/accounts/data?")
+        assert ("GET", "/backend-api/wham/rate-limit-reset-credits", "Bearer fake-access-token", "chatgpt-account") in codex_seen
+        invite_payload = next(item[3] for item in codex_seen if item[1] == "/backend-api/wham/referrals/invite")
+        assert invite_payload["emails"] == ["a@example.com", "b@example.com"]
+        consume_payload = next(item[3] for item in codex_seen if item[1] == "/backend-api/wham/rate-limit-reset-credits/consume")
+        assert consume_payload["credit_id"] == "credit-1"
+        assert consume_payload["redeem_request_id"] == consume_data["redeem_request_id"]
     finally:
         ui_server.shutdown()
         ui_server.server_close()
         admin_server.shutdown()
         admin_server.server_close()
+        codex_server.shutdown()
+        codex_server.server_close()
+
+
+def test_invite_reset_refreshes_expired_token_against_mock_admin(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+    export_count = 0
+    refreshed = []
+    codex_auth = []
+
+    class AdminHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal export_count
+            export_count += 1
+            token = "expired-token" if export_count == 1 else "fresh-token"
+            expires_at = "2020-01-01T00:00:00Z" if export_count == 1 else "2099-01-01T00:00:00Z"
+            body = {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "accounts": [{
+                        "name": "codex-01",
+                        "platform": "openai",
+                        "type": "oauth",
+                        "credentials": {"access_token": token, "expires_at": expires_at},
+                    }],
+                    "proxies": [],
+                },
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_POST(self):
+            refreshed.append(self.path)
+            body = {"code": 0, "message": "success", "data": {}}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    class CodexHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            codex_auth.append(self.headers.get("Authorization"))
+            if self.path.startswith("/backend-api/referrals/invite/eligibility"):
+                body = {}
+            elif self.path.startswith("/backend-api/wham/referrals/eligibility_rules"):
+                body = {}
+            else:
+                body = {"credits": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    admin_server = HTTPServer(("127.0.0.1", 0), AdminHandler)
+    threading.Thread(target=admin_server.serve_forever, daemon=True).start()
+    codex_server = HTTPServer(("127.0.0.1", 0), CodexHandler)
+    threading.Thread(target=codex_server.serve_forever, daemon=True).start()
+    ui_server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        platform="openai",
+        base_url=f"http://127.0.0.1:{admin_server.server_address[1]}",
+        admin_key="secret",
+        codex_invite_base_url=f"http://127.0.0.1:{codex_server.server_address[1]}/backend-api",
+    )
+    try:
+        host, port = ui_server.server_address
+        with urlopen(f"http://{host}:{port}/api/accounts/7/codex/invite-reset/status", timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assert data["available_count"] == 0
+        assert refreshed == ["/api/v1/admin/openai/accounts/7/refresh"]
+        assert codex_auth == ["Bearer fresh-token", "Bearer fresh-token", "Bearer fresh-token"]
+    finally:
+        ui_server.shutdown()
+        ui_server.server_close()
+        admin_server.shutdown()
+        admin_server.server_close()
+        codex_server.shutdown()
+        codex_server.server_close()

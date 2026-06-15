@@ -86,25 +86,19 @@ class AdminAPI:
             log.error("bulk-update failed fields=%s ids=%s: %s", fields, account_ids, e)
             return False
 
-    def codex_invite_reset_status(self, account_id: int) -> dict:
+    def export_account_data(self, account_id: int) -> dict:
+        """导出单账号原始数据，用于读取未脱敏 OAuth credentials。"""
         resp = self.session.get(
-            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/status",
+            f"{self.base_url}/api/v1/admin/accounts/data",
+            params={"ids": str(account_id), "include_proxies": "true"},
             timeout=self.timeout,
         )
         return self._get_data(resp)
 
-    def send_codex_invite_reset_invite(self, account_id: int, emails: list[str]) -> dict:
+    def refresh_openai_account(self, account_id: int) -> dict:
+        """刷新 OpenAI OAuth 账号。仅由邀请管理在 token 缺失或过期时触发。"""
         resp = self.session.post(
-            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/invite",
-            json={"emails": emails},
-            timeout=self.timeout,
-        )
-        return self._get_data(resp)
-
-    def consume_codex_invite_reset(self, account_id: int, credit_id: str) -> dict:
-        resp = self.session.post(
-            f"{self.base_url}/api/v1/admin/accounts/{account_id}/codex/invite-reset/consume",
-            json={"credit_id": credit_id},
+            f"{self.base_url}/api/v1/admin/openai/accounts/{account_id}/refresh",
             timeout=self.timeout,
         )
         return self._get_data(resp)

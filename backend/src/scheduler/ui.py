@@ -1,6 +1,6 @@
 """调度看板后端。
 
-使用标准库 HTTPServer，提供快照 API、邀请管理代理和前端静态文件托管。
+使用标准库 HTTPServer，提供快照 API、Codex 邀请管理和前端静态文件托管。
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .api import AdminAPI
 from .config import load_config
+from .codex_invite import CodexInviteReset, InviteResetError
 from .store import Store
 
 STATIC_DIR = Path(__file__).with_name("frontend")
@@ -410,9 +412,10 @@ def serve(
     account_name_pattern: str = "",
     base_url: str = "",
     admin_key: str = "",
+    codex_invite_base_url: str = "",
 ) -> None:
     Store(db_path).close()
-    handler = _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key)
+    handler = _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key, codex_invite_base_url)
     ThreadingHTTPServer((host, port), handler).serve_forever()
 
 
@@ -425,11 +428,12 @@ def start_background(
     account_name_pattern: str = "",
     base_url: str = "",
     admin_key: str = "",
+    codex_invite_base_url: str = "",
 ) -> ThreadingHTTPServer:
     Store(db_path).close()
     server = ThreadingHTTPServer(
         (host, port),
-        _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key),
+        _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key, codex_invite_base_url),
     )
     thread = threading.Thread(target=server.serve_forever, name="scheduler-ui", daemon=True)
     thread.start()
@@ -535,8 +539,10 @@ def _handler(
     account_name_pattern: str,
     base_url: str,
     admin_key: str,
+    codex_invite_base_url: str = "",
 ) -> type[BaseHTTPRequestHandler]:
     api = AdminAPI(base_url, admin_key) if base_url and admin_key else None
+    invite = CodexInviteReset(api, codex_invite_base_url or os.environ.get("CODEX_INVITE_RESET_BASE_URL", "")) if api else None
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -549,7 +555,7 @@ def _handler(
                 )
                 self._send_text(HTTPStatus.OK, body, "application/json; charset=utf-8")
                 return
-            if self._handle_invite_reset_get(parsed.path, api):
+            if self._handle_invite_reset_get(parsed.path, invite):
                 return
             if self._send_static(parsed.path):
                 return
@@ -557,41 +563,45 @@ def _handler(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if self._handle_invite_reset_post(parsed.path, api):
+            if self._handle_invite_reset_post(parsed.path, invite):
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def log_message(self, format: str, *args: object) -> None:
             return
 
-        def _handle_invite_reset_get(self, path: str, api: AdminAPI | None) -> bool:
+        def _handle_invite_reset_get(self, path: str, invite: CodexInviteReset | None) -> bool:
             account_id, action = _parse_invite_reset_path(path)
             if account_id is None or action != "status":
                 return False
-            if api is None:
+            if invite is None:
                 self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "admin api is not configured"})
                 return True
             try:
-                self._send_json(HTTPStatus.OK, api.codex_invite_reset_status(account_id))
+                self._send_json(HTTPStatus.OK, invite.status(account_id))
+            except InviteResetError as e:
+                self._send_json(HTTPStatus(e.status), {"error": str(e)})
             except Exception as e:
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
             return True
 
-        def _handle_invite_reset_post(self, path: str, api: AdminAPI | None) -> bool:
+        def _handle_invite_reset_post(self, path: str, invite: CodexInviteReset | None) -> bool:
             account_id, action = _parse_invite_reset_path(path)
             if account_id is None or action not in {"invite", "consume"}:
                 return False
-            if api is None:
+            if invite is None:
                 self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "admin api is not configured"})
                 return True
             try:
                 payload = self._read_json()
                 if action == "invite":
-                    self._send_json(HTTPStatus.OK, api.send_codex_invite_reset_invite(account_id, payload.get("emails") or []))
+                    self._send_json(HTTPStatus.OK, invite.send_invite(account_id, payload.get("emails") or []))
                     return True
-                self._send_json(HTTPStatus.OK, api.consume_codex_invite_reset(account_id, str(payload.get("credit_id") or "")))
+                self._send_json(HTTPStatus.OK, invite.consume(account_id, str(payload.get("credit_id") or "")))
             except ValueError as e:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+            except InviteResetError as e:
+                self._send_json(HTTPStatus(e.status), {"error": str(e)})
             except Exception as e:
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
             return True

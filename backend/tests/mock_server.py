@@ -98,8 +98,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         parts = url.path.strip("/").split("/")
-        # /api/v1/admin/accounts/:id/codex/invite-reset/status
-        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "status"]:
+        if url.path.startswith("/backend-api/referrals/invite/eligibility"):
+            self._send({"requires_explicit_confirmation": True})
+            return
+        if url.path.startswith("/backend-api/wham/referrals/eligibility_rules"):
+            self._send({"rules": ["账号需要支持 Codex OAuth", "每次最多邀请 5 个邮箱"]})
+            return
+        if url.path == "/backend-api/wham/rate-limit-reset-credits":
             self._send({
                 "available_count": 1,
                 "credits": [
@@ -110,8 +115,23 @@ class Handler(BaseHTTPRequestHandler):
                         "description": "Mock credit for local UI testing",
                     }
                 ],
-                "eligibility_rules": ["账号需要支持 Codex OAuth", "每次最多邀请 5 个邮箱"],
-                "requires_consent": True,
+            })
+            return
+        if url.path == "/api/v1/admin/accounts/data":
+            self._send({
+                "accounts": [{
+                    "name": "codex-01",
+                    "platform": "openai",
+                    "type": "oauth",
+                    "credentials": {
+                        "access_token": "mock-access-token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "chatgpt_account_id": "mock-chatgpt-account",
+                    },
+                    "concurrency": 1,
+                    "priority": 50,
+                }],
+                "proxies": [],
             })
             return
         # /api/v1/admin/accounts/:id/usage
@@ -132,11 +152,14 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or b"{}")
         url = urlparse(self.path)
         parts = url.path.strip("/").split("/")
-        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "invite"]:
+        if url.path == "/backend-api/wham/referrals/invite":
             self._send({"invites": [{"email": email} for email in payload.get("emails", [])]})
             return
-        if len(parts) == 8 and parts[-3:] == ["codex", "invite-reset", "consume"]:
+        if url.path == "/backend-api/wham/rate-limit-reset-credits/consume":
             self._send({"code": "reset", "credit_id": payload.get("credit_id"), "available_count": 0})
+            return
+        if len(parts) == 7 and parts[:5] == ["api", "v1", "admin", "openai", "accounts"] and parts[-1] == "refresh":
+            self._send({"ok": True})
             return
         print(f"BULK-UPDATE: {payload}", flush=True)
         self._send({"updated": len(payload.get("account_ids", []))})
