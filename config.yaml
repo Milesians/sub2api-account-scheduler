@@ -19,7 +19,9 @@ max_active_probes_per_round: 10
 usage_stale_threshold_minutes: 90
 cooldown_minutes: 60
 safe_tail_hours: 2.0
+warmup_hours: 24.0              # 窗口重置后的预热时长：elapsed 不足时按比例折减 projected_gap，避免刚重置（近期速率≈0）的号缺口虚高霸占强力名额
 strong_score_threshold: 3.0
+strong_min_required_rate: 0.6  # 强力补量最低需要速率（%/h）：required_rate 低于此值的号不进强力（仍可温和），避免给跑道充裕、本不需高速率的号强力补量
 mild_score_threshold: 1.0
 ahead_band_pp: 3.0
 cooldown_abs_rate_pph: 1.2

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, fields
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,7 +35,9 @@ class Config:
     usage_stale_threshold_minutes: int = 90
     cooldown_minutes: int = 60
     safe_tail_hours: float = 2.0
+    warmup_hours: float = 24.0
     strong_score_threshold: float = 3.0
+    strong_min_required_rate: float = 0.6
     mild_score_threshold: float = 1.0
     ahead_band_pp: float = 3.0
     cooldown_abs_rate_pph: float = 1.2
@@ -90,7 +95,8 @@ def load_config(path: str | None = None) -> Config:
         valid = {f.name for f in fields(Config)}
         for key, value in data.items():
             if key not in valid:
-                raise ValueError(f"unknown config key: {key}")
+                log.warning("ignoring unknown config key: %s", key)
+                continue
             if key == "priority_bands":
                 value = tuple(int(v) for v in value)
             if key == "ui_enabled":

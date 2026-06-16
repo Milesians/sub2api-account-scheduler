@@ -172,9 +172,12 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
         r.projected_gap = cfg.target_7d_utilization - r.metrics.projected_end
         r.speed_gap = r.metrics.required_rate - r.metrics.recent_rate
         urgency = 1.0 + _clamp((cfg.emergency_window_hours - r.remaining_h) / cfg.emergency_window_hours, 0.0, 1.0)
+        # 预热宽限：窗口刚重置时近期速率≈0 会把 projected_gap 抬虚高，按 elapsed 比例折减
+        elapsed_h = _clamp(cfg.window_hours - r.remaining_h, 0.0, cfg.window_hours)
+        warmup = _clamp(elapsed_h / cfg.warmup_hours, 0.0, 1.0) if cfg.warmup_hours > 0 else 1.0
         r.catchup = urgency * (
             max(0.0, r.pace_error)
-            + 0.7 * max(0.0, r.projected_gap)
+            + 0.7 * warmup * max(0.0, r.projected_gap)
             + 6.0 * max(0.0, r.speed_gap)
         )
         r.clearly_need_boost = (
@@ -193,7 +196,12 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
         key=lambda r: (-r.catchup, r.seven_day, r.remaining_h, r.state.last_boost_at or very_old, r.snap.id),
     )
 
-    strong_candidates = [r for r in ranked if r.catchup >= cfg.strong_score_threshold]
+    # 强力门槛：required_rate 太低的号（跑道充裕、本不需高速率）只给温和，不占强力名额
+    strong_candidates = [
+        r for r in ranked
+        if r.catchup >= cfg.strong_score_threshold
+        and r.metrics.required_rate >= cfg.strong_min_required_rate
+    ]
     strong = strong_candidates[:strong_cap]
 
     strong_ids = {r.snap.id for r in strong}

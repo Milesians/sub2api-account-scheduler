@@ -194,6 +194,48 @@ def test_recent_5h_burn_reduces_catchup_score():
     assert fast_d.recent_5h_burn == 1.0
 
 
+def test_low_required_rate_excluded_from_strong():
+    # 刚重置、跑道充裕的号：catchup 很高但 required_rate < 门槛 → 只给温和，不占强力名额。
+    # warmup_hours 调小以隔离门槛逻辑（不让预热折减干扰 catchup）。
+    fresh = mk_snap(1, 5.0, recent_5h_burn=0.0, seven_day_reset_at=NOW + timedelta(hours=160))
+    state = mk_state(1, 5.0, hourly_burn_ewma=0.0)
+    state.last_7d_reset_at = NOW + timedelta(hours=160)
+    cfg = mk_cfg(warmup_hours=0.1, strong_min_required_rate=0.6)
+    d, _ = decide_one(fresh, state, cfg=cfg, peers=[neutral_peer(2)])
+    assert d.catchup_score >= cfg.strong_score_threshold  # 分数本身够强
+    assert d.required_rate < cfg.strong_min_required_rate
+    assert d.reason == "mild_boost"
+    assert d.target_load_factor == 2
+
+
+def test_warmup_discounts_fresh_reset_catchup():
+    # 同一个刚重置的号，预热折减会显著压低其 catchup_score。
+    fresh = mk_snap(1, 5.0, recent_5h_burn=0.0, seven_day_reset_at=NOW + timedelta(hours=160))
+
+    def score(warmup_hours):
+        state = mk_state(1, 5.0, hourly_burn_ewma=0.0)
+        state.last_7d_reset_at = NOW + timedelta(hours=160)
+        d, _ = decide_one(fresh, state, cfg=mk_cfg(warmup_hours=warmup_hours), peers=[neutral_peer(2)])
+        return d.catchup_score
+
+    assert score(48.0) < score(0.1)
+
+
+def test_fresh_reset_does_not_steal_strong_from_behind():
+    # pay2/pay4 复盘：刚重置的健康号（跑道充裕）不应抢走真正告急的号的唯一强力名额。
+    behind = mk_snap(1, 35.0, recent_5h_burn=1.3, seven_day_reset_at=NOW + timedelta(hours=40))
+    fresh = mk_snap(2, 5.0, recent_5h_burn=0.0, seven_day_reset_at=NOW + timedelta(hours=160))
+    states = {
+        1: mk_state(1, 34.0, last_7d_reset_at=NOW + timedelta(hours=40)),
+        2: mk_state(2, 5.0, hourly_burn_ewma=0.0, last_7d_reset_at=NOW + timedelta(hours=160)),
+    }
+    decisions, _ = decide([behind, fresh], states, mk_cfg(), NOW)
+    by_id = {d.account_id: d for d in decisions}
+    assert by_id[1].reason == "boost"
+    assert by_id[1].target_load_factor == 3
+    assert by_id[2].reason != "boost"
+
+
 def test_emergency_window_allows_band_jump():
     # 剩余 6h、明显落后：priority 回 normal，补量通过 load_factor 加权。
     snap = mk_snap(1, 50.0, priority=1070, seven_day_reset_at=NOW + timedelta(hours=6))
