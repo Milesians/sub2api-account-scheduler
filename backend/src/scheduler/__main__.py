@@ -39,6 +39,7 @@ def main() -> None:
             cfg.account_name_pattern,
             cfg.base_url,
             cfg.admin_key,
+            frame_ancestors=cfg.ui_frame_ancestor_hosts,
         )
         return
     if cfg.ui_enabled:
@@ -53,6 +54,7 @@ def main() -> None:
             cfg.account_name_pattern,
             cfg.base_url,
             cfg.admin_key,
+            frame_ancestors=cfg.ui_frame_ancestor_hosts,
         )
         logging.getLogger(__name__).info("dashboard listening on %s:%s", ui_host, ui_port)
     run(cfg, once=args.once)

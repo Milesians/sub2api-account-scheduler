@@ -110,6 +110,44 @@ def test_start_background_serves_snapshot(tmp_path):
         server.server_close()
 
 
+def test_ui_allows_all_frame_ancestors_by_default(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    try:
+        host, port = server.server_address
+        with urlopen(f"http://{host}:{port}/", timeout=2) as resp:
+            assert resp.headers.get("Content-Security-Policy") is None
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_ui_sends_frame_ancestor_whitelist_header(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        frame_ancestors=("https://example.com", "https://admin.example.com:8443"),
+    )
+    try:
+        host, port = server.server_address
+        with urlopen(f"http://{host}:{port}/", timeout=2) as resp:
+            assert resp.headers.get("Content-Security-Policy") == (
+                "frame-ancestors https://example.com https://admin.example.com:8443"
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_scheduler_control_route_toggles_paused(tmp_path):
     db = tmp_path / "scheduler.db"
     heartbeat = tmp_path / "last_tick"

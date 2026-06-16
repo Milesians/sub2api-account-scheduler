@@ -415,9 +415,19 @@ def serve(
     base_url: str = "",
     admin_key: str = "",
     codex_invite_base_url: str = "",
+    frame_ancestors: tuple[str, ...] = (),
 ) -> None:
     Store(db_path).close()
-    handler = _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key, codex_invite_base_url)
+    handler = _handler(
+        db_path,
+        heartbeat_file,
+        platform,
+        account_name_pattern,
+        base_url,
+        admin_key,
+        codex_invite_base_url,
+        frame_ancestors,
+    )
     ThreadingHTTPServer((host, port), handler).serve_forever()
 
 
@@ -431,11 +441,21 @@ def start_background(
     base_url: str = "",
     admin_key: str = "",
     codex_invite_base_url: str = "",
+    frame_ancestors: tuple[str, ...] = (),
 ) -> ThreadingHTTPServer:
     Store(db_path).close()
     server = ThreadingHTTPServer(
         (host, port),
-        _handler(db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key, codex_invite_base_url),
+        _handler(
+            db_path,
+            heartbeat_file,
+            platform,
+            account_name_pattern,
+            base_url,
+            admin_key,
+            codex_invite_base_url,
+            frame_ancestors,
+        ),
     )
     thread = threading.Thread(target=server.serve_forever, name="scheduler-ui", daemon=True)
     thread.start()
@@ -551,6 +571,7 @@ def main() -> None:
         cfg.account_name_pattern,
         cfg.base_url,
         cfg.admin_key,
+        frame_ancestors=cfg.ui_frame_ancestor_hosts,
     )
 
 
@@ -562,9 +583,11 @@ def _handler(
     base_url: str,
     admin_key: str,
     codex_invite_base_url: str = "",
+    frame_ancestors: tuple[str, ...] = (),
 ) -> type[BaseHTTPRequestHandler]:
     api = AdminAPI(base_url, admin_key) if base_url and admin_key else None
     invite = CodexInviteReset(api, codex_invite_base_url or os.environ.get("CODEX_INVITE_RESET_BASE_URL", "")) if api else None
+    frame_ancestors_header = _frame_ancestors_header(frame_ancestors)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -691,6 +714,7 @@ def _handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            self._send_frame_ancestors_header()
             self.end_headers()
             self.wfile.write(data)
             return True
@@ -704,8 +728,13 @@ def _handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            self._send_frame_ancestors_header()
             self.end_headers()
             self.wfile.write(data)
+
+        def _send_frame_ancestors_header(self) -> None:
+            if frame_ancestors_header:
+                self.send_header("Content-Security-Policy", frame_ancestors_header)
 
     return Handler
 
@@ -735,6 +764,13 @@ def _verify_sensitive_password(payload: dict[str, Any]) -> None:
     provided = payload.get("sensitive_password")
     if not isinstance(provided, str) or not secrets.compare_digest(provided, expected):
         raise ValueError("敏感操作密码错误")
+
+
+def _frame_ancestors_header(frame_ancestors: tuple[str, ...]) -> str:
+    sources = [source.strip() for source in frame_ancestors if source.strip()]
+    if not sources:
+        return ""
+    return "frame-ancestors " + " ".join(sources)
 
 
 def _static_path(path: str) -> Path | None:

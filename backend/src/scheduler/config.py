@@ -55,6 +55,7 @@ class Config:
     ui_enabled: bool = False
     ui_host: str = "0.0.0.0"
     ui_port: int = 18080
+    ui_frame_ancestor_hosts: tuple[str, ...] = ()
     sample_retention_days: int = 14
     decision_retention_days: int = 30
     state_retention_days: int = 30
@@ -101,6 +102,8 @@ def load_config(path: str | None = None) -> Config:
                 value = tuple(int(v) for v in value)
             if key == "ui_enabled":
                 value = _bool(value)
+            if key == "ui_frame_ancestor_hosts":
+                value = _string_tuple(value)
             setattr(cfg, key, value)
 
     cfg.base_url = os.environ.get("SUB2API_BASE_URL", cfg.base_url).rstrip("/")
@@ -138,3 +141,11 @@ def _bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    return tuple(str(v).strip() for v in value if str(v).strip())
