@@ -13,11 +13,21 @@ def test_store_migrates_and_persists_new_state_fields(tmp_path):
         version = store.conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
         assert version == SCHEMA_VERSION
 
-        state = AccountState(account_id=1, last_priority=1030, last_boost_at=NOW)
+        state = AccountState(
+            account_id=1,
+            last_priority=1030,
+            last_boost_at=NOW,
+            last_terminal_boost_at=NOW,
+            last_terminal_level="strong",
+            last_probe_attempt_at=NOW,
+        )
         store.save_states([state], NOW)
 
         loaded = store.load_states()[1]
         assert loaded.last_boost_at == NOW
+        assert loaded.last_terminal_boost_at == NOW
+        assert loaded.last_terminal_level == "strong"
+        assert loaded.last_probe_attempt_at == NOW
     finally:
         store.close()
 
@@ -98,6 +108,12 @@ def test_decision_log_keeps_scheduler_metrics(tmp_path):
             required_rate=0.7,
             recent_rate=0.3,
             remaining_hours=12.0,
+            mode="terminal",
+            drain_gap=3.1,
+            drain_required_rate=0.7,
+            drain_pressure=2.3,
+            drain_level="strong",
+            deadline_hours=11.75,
         )
         store.add_decisions("run-1", [decision], NOW)
 
@@ -111,6 +127,12 @@ def test_decision_log_keeps_scheduler_metrics(tmp_path):
         assert row["required_rate"] == 0.7
         assert row["recent_rate"] == 0.3
         assert row["remaining_hours"] == 12.0
+        assert row["mode"] == "terminal"
+        assert row["drain_gap"] == 3.1
+        assert row["drain_required_rate"] == 0.7
+        assert row["drain_pressure"] == 2.3
+        assert row["drain_level"] == "strong"
+        assert row["deadline_hours"] == 11.75
     finally:
         store.close()
 

@@ -1,7 +1,8 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import scheduler.runner as runner
 from scheduler.config import Config
+from scheduler.models import AccountSnapshot
 from scheduler.store import Store
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
@@ -65,3 +66,44 @@ def test_tick_skips_paused_accounts(tmp_path):
     assert decisions == 0
     assert api.probed == []
     assert api.updated == []
+
+
+def stale_snap(account_id, *, sampled_at, seven_day=80.0, reset_hours=84.0, priority=1050):
+    return AccountSnapshot(
+        id=account_id,
+        name=f"pay{account_id}",
+        type="oauth",
+        priority=priority,
+        concurrency=1,
+        load_factor=None,
+        status="active",
+        schedulable=True,
+        rate_limited=False,
+        overloaded=False,
+        temp_unschedulable=False,
+        seven_day_used=seven_day,
+        seven_day_reset_at=NOW + timedelta(hours=reset_hours),
+        sampled_at=sampled_at,
+        usage_source="passive" if sampled_at else "missing",
+    )
+
+
+def test_terminal_probe_uses_shorter_stale_threshold_and_larger_budget():
+    cfg = Config(base_url="http://admin", admin_key="secret", platform="openai")
+    terminal = [
+        stale_snap(i, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0 + i, reset_hours=6)
+        for i in range(1, 31)
+    ]
+    normal = stale_snap(100, sampled_at=NOW - timedelta(minutes=25), seven_day=20.0, reset_hours=84)
+    stale = [s for s in [*terminal, normal] if runner._snapshot_stale(s, cfg, NOW)]
+
+    assert len(stale) == 30
+    assert runner._probe_budget([*terminal, normal], stale, cfg, NOW) == 20
+
+
+def test_terminal_probe_score_prioritizes_gap_and_protective_band():
+    cfg = Config(base_url="http://admin", admin_key="secret", platform="openai")
+    urgent = stale_snap(1, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0, reset_hours=3, priority=1070)
+    less_urgent = stale_snap(2, sampled_at=NOW - timedelta(minutes=25), seven_day=99.3, reset_hours=20)
+
+    assert runner._probe_score(urgent, None, cfg, NOW) > runner._probe_score(less_urgent, None, cfg, NOW)

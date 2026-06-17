@@ -521,6 +521,12 @@ def snapshot(
               d.required_rate,
               d.recent_rate,
               d.remaining_hours,
+              d.mode,
+              d.drain_gap,
+              d.drain_required_rate,
+              d.drain_pressure,
+              d.drain_level,
+              d.deadline_hours,
               d.decided_at AS last_decided_at
             FROM account_state s
             LEFT JOIN account_control c ON c.account_id = s.account_id

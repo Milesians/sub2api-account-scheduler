@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 import uuid
@@ -105,16 +106,17 @@ def _probe_stale(
     探测响应里才有 sonnet 窗口数据；探测同时触发 sub2api 回写被动缓存。
     按 sampled_at 最旧优先，超出名额的下轮自然轮转。
     """
-    threshold = timedelta(minutes=cfg.usage_stale_threshold_minutes)
     stale = [
         s for s in eligible
-        if s.sampled_at is None or s.seven_day_used is None or (now - s.sampled_at) > threshold
+        if _snapshot_stale(s, cfg, now)
     ]
-    stale.sort(key=lambda s: s.sampled_at or datetime.min.replace(tzinfo=UTC))
+    stale.sort(key=lambda s: _probe_score(s, states.get(s.id), cfg, now), reverse=True)
+    budget = _probe_budget(eligible, stale, cfg, now)
 
     probed = 0
-    for snap in stale[: cfg.max_active_probes_per_round]:
+    for snap in stale[:budget]:
         state = states.setdefault(snap.id, AccountState(account_id=snap.id))
+        state.last_probe_attempt_at = now
         usage = api.probe_usage(snap.id)
         probed += 1
         if usage is not None:
@@ -123,6 +125,75 @@ def _probe_stale(
         else:
             state.probe_failures += 1
     return probed
+
+
+def _snapshot_stale(snap: AccountSnapshot, cfg: Config, now: datetime) -> bool:
+    if snap.sampled_at is None or snap.seven_day_used is None:
+        return True
+    threshold = (
+        cfg.terminal_usage_stale_threshold_minutes
+        if _is_terminal_snapshot(snap, cfg, now)
+        else cfg.usage_stale_threshold_minutes
+    )
+    return (now - snap.sampled_at) > timedelta(minutes=threshold)
+
+
+def _is_terminal_snapshot(snap: AccountSnapshot, cfg: Config, now: datetime) -> bool:
+    if not cfg.terminal_drain_enabled or snap.seven_day_reset_at is None:
+        return False
+    remaining_h = (snap.seven_day_reset_at - now).total_seconds() / 3600.0
+    return 0.0 < remaining_h <= cfg.terminal_window_hours
+
+
+def _probe_budget(
+    eligible: list[AccountSnapshot],
+    stale: list[AccountSnapshot],
+    cfg: Config,
+    now: datetime,
+) -> int:
+    terminal_stale = sum(1 for s in stale if _is_terminal_snapshot(s, cfg, now))
+    if terminal_stale == 0:
+        return cfg.max_active_probes_per_round
+    terminal_total = sum(1 for s in eligible if _is_terminal_snapshot(s, cfg, now))
+    terminal_budget = max(
+        cfg.terminal_min_active_probes_per_round,
+        math.ceil(terminal_total * cfg.terminal_active_probe_ratio),
+    )
+    return max(
+        cfg.max_active_probes_per_round,
+        min(cfg.terminal_max_active_probes_per_round, terminal_budget),
+    )
+
+
+def _probe_score(snap: AccountSnapshot, state: AccountState | None, cfg: Config, now: datetime) -> float:
+    score = 0.0
+    no_data = snap.sampled_at is None or snap.seven_day_used is None
+    if no_data:
+        score += 1000.0
+
+    terminal = _is_terminal_snapshot(snap, cfg, now)
+    if snap.seven_day_reset_at is not None:
+        remaining_h = max((snap.seven_day_reset_at - now).total_seconds() / 3600.0, 0.0)
+        if terminal:
+            score += 500.0
+            score += max(0.0, cfg.terminal_window_hours - remaining_h) * 10.0
+
+    if snap.seven_day_used is not None:
+        gap = max(0.0, cfg.drain_target_7d_utilization - snap.seven_day_used)
+        score += gap * 20.0
+        if terminal and snap.priority in (cfg.band_protect, cfg.band_floor) and gap > cfg.terminal_done_band_pp:
+            score += 100.0
+
+    if snap.effective_load_factor > snap.base_load_factor:
+        score += 80.0
+
+    if snap.sampled_at is not None:
+        stale_minutes = max(0.0, (now - snap.sampled_at).total_seconds() / 60.0)
+        score += min(stale_minutes, 360.0) / 10.0
+
+    if state is not None:
+        score -= min(state.probe_failures, 5) * 50.0
+    return score
 
 
 def _save_managed_states(

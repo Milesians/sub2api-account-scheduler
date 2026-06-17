@@ -33,6 +33,12 @@ interface DashboardAccount {
   required_rate: number | null
   recent_rate: number | null
   remaining_hours: number | null
+  mode: string | null
+  drain_gap: number | null
+  drain_required_rate: number | null
+  drain_pressure: number | null
+  drain_level: string | null
+  deadline_hours: number | null
   last_7d_reset_at: string | null
   last_5h_used: number | null
   last_sampled_at: string | null
@@ -56,6 +62,12 @@ interface Decision {
   required_rate: number | null
   recent_rate: number | null
   remaining_hours: number | null
+  mode: string | null
+  drain_gap: number | null
+  drain_required_rate: number | null
+  drain_pressure: number | null
+  drain_level: string | null
+  deadline_hours: number | null
   seven_day_reset_at: string | null
   five_hour_used: number | null
   catchup_score: number | null
@@ -178,6 +190,7 @@ function fmtTime(value: string | null | undefined) {
 
 function reasonClass(reason: string | null | undefined) {
   if (!reason) return ''
+  if (reason.includes('terminal_drain')) return 'boost'
   if (reason.includes('boost') || reason === 'behind') return 'boost'
   if (reason.includes('protect') || reason.includes('cap')) return 'protect'
   if (reason.includes('cooldown') || reason.includes('hot')) return 'hot'
@@ -196,6 +209,14 @@ const reasonLabels: Record<string, string> = {
   cooldown_hold: '冷却中保持保护',
   new_cooldown: '触发冷却保护',
   new_cooldown_will_hit_goal: '即将达标冷却',
+  terminal_drain_strong: '终局强冲刺',
+  terminal_drain_strong_jump: '终局强冲刺',
+  terminal_drain_mild: '终局中冲刺',
+  terminal_drain_mild_jump: '终局中冲刺',
+  terminal_drain_normal: '终局维持',
+  terminal_done: '终局达标保护',
+  terminal_no_data_base: '终局无数据回基础权重',
+  terminal_stale_base: '终局数据过期回基础权重',
   no_data_hold: '无数据保持',
   stale_hold: '数据过期保持',
   invalid_reset_hold: '重置时间异常保持',
@@ -218,6 +239,23 @@ function gapClass(value: number | null | undefined) {
   if (value > 0.5) return 'behind'
   if (value < -0.5) return 'ahead'
   return 'on-track'
+}
+
+function modeText(mode: string | null | undefined) {
+  if (mode === 'terminal') return '冲刺'
+  if (mode === 'pacing') return '节奏'
+  if (mode === 'hold') return '保持'
+  return '-'
+}
+
+function drainLevelText(level: string | null | undefined) {
+  const labels: Record<string, string> = {
+    strong: '强',
+    mild: '中',
+    normal: '稳',
+    done: '达标'
+  }
+  return level ? (labels[level] ?? level) : '-'
 }
 
 function lfClass(account: DashboardAccount) {
@@ -506,6 +544,7 @@ onMounted(() => {
             <tr>
               <th>账号</th>
               <th>官方订阅</th>
+              <th>模式</th>
               <th>7d / 期望</th>
               <th>差距</th>
               <th>LF</th>
@@ -533,6 +572,12 @@ onMounted(() => {
                   <strong>{{ subscriptionText(account) }}</strong>
                   <span>过期 {{ fmtTime(account.subscription_expires_at) }}</span>
                   <span v-if="account.subscription_error" class="subscription-error">{{ account.subscription_error }}</span>
+                </div>
+              </td>
+              <td class="num">
+                <div>{{ modeText(account.mode) }} / {{ drainLevelText(account.drain_level) }}</div>
+                <div class="cell-sub">
+                  gap {{ fmtNum(account.drain_gap, 2) }} / P {{ fmtNum(account.drain_pressure, 2) }}
                 </div>
               </td>
               <td class="usage-cell">
@@ -607,6 +652,7 @@ onMounted(() => {
               <th>时间</th>
               <th>账号</th>
               <th>Priority / LF</th>
+              <th>模式</th>
               <th>7d / 期望</th>
               <th>5h</th>
               <th>速率</th>
@@ -626,6 +672,12 @@ onMounted(() => {
               <td :class="['num', { changed: decision.changed }]">
                 {{ decision.current_priority ?? '-' }} -> {{ decision.target_priority ?? '-' }}
                 / LF {{ decision.current_load_factor ?? '-' }} -> {{ decision.target_load_factor ?? '-' }}
+              </td>
+              <td class="num">
+                <div>{{ modeText(decision.mode) }} / {{ drainLevelText(decision.drain_level) }}</div>
+                <div class="cell-sub">
+                  gap {{ fmtNum(decision.drain_gap, 2) }} / P {{ fmtNum(decision.drain_pressure, 2) }}
+                </div>
               </td>
               <td class="num">
                 <div>{{ fmtPct(decision.seven_day_used) }} / {{ fmtPct(decision.target_now) }}</div>

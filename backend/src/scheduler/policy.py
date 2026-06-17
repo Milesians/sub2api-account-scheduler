@@ -50,29 +50,35 @@ def decide(
         decisions[snap.id] = d
 
         first_takeover_invalid = state.last_priority is None and snap.priority not in cfg.priority_bands
+        terminal_hint = _is_terminal_hint(snap, cfg, now)
 
         # 数据缺失 / 过期：保持当前档位，不降档（冷账号死锁防护），不更新基线。
         # 首次接管非法档位例外：先归一到 normal，避免外部旧 priority 持续吸流。
         if snap.seven_day_used is None or snap.seven_day_reset_at is None or snap.sampled_at is None:
             if first_takeover_invalid:
-                _finalize(d, state, snap, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover", mode="hold")
             else:
-                d.reason = "no_data_hold"
+                _hold(d, snap, "terminal_no_data_base" if terminal_hint else "no_data_hold", terminal_hint)
             continue
-        if (now - snap.sampled_at) > timedelta(minutes=cfg.usage_stale_threshold_minutes):
+        stale_threshold = (
+            cfg.terminal_usage_stale_threshold_minutes
+            if terminal_hint
+            else cfg.usage_stale_threshold_minutes
+        )
+        if (now - snap.sampled_at) > timedelta(minutes=stale_threshold):
             if first_takeover_invalid:
-                _finalize(d, state, snap, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover", mode="hold")
             else:
-                d.reason = "stale_hold"
+                _hold(d, snap, "terminal_stale_base" if terminal_hint else "stale_hold", terminal_hint)
             continue
 
         seven_day = max(snap.seven_day_used, snap.seven_day_sonnet_used or 0.0)
         remaining_h_raw = (snap.seven_day_reset_at - now).total_seconds() / 3600.0
         if remaining_h_raw <= 0.0 or remaining_h_raw > cfg.window_hours:
             if first_takeover_invalid:
-                _finalize(d, state, snap, cfg.band_normal, "takeover")
+                _finalize(d, state, snap, cfg.band_normal, "takeover", mode="hold")
             else:
-                d.reason = "invalid_reset_hold"
+                _hold(d, snap, "invalid_reset_hold")
             continue
 
         previous_burn_ewma = state.hourly_burn_ewma
@@ -81,24 +87,41 @@ def decide(
 
         remaining_h = max(remaining_h_raw, 0.1)
         rate_5h = snap.recent_5h_burn if snap.recent_5h_burn is not None else previous_burn_ewma
+        terminal = cfg.terminal_drain_enabled and remaining_h <= cfg.terminal_window_hours
+        mode = "terminal" if terminal else "pacing"
+
+        # 硬规则：允许跳档直接到位
+        if seven_day >= cfg.hard_cap_7d_utilization:
+            _finalize(d, state, snap, cfg.band_floor, "hard_cap_7d", mode=mode)
+            continue
+        if (
+            cfg.enable_5h_guard
+            and snap.five_hour_used is not None
+            and snap.five_hour_used >= cfg.hard_cap_5h_utilization
+        ):
+            _finalize(d, state, snap, cfg.band_floor, "hard_cap_5h", mode=mode)
+            continue
+        if first_takeover_invalid:
+            _finalize(d, state, snap, cfg.band_normal, "takeover", mode=mode)
+            continue
+        if terminal:
+            drain = _drain_metrics(cfg, seven_day, remaining_h, recent_burn, rate_5h)
+            _attach_drain_metrics(d, drain, seven_day, remaining_h, recent_burn, snap.recent_5h_burn, cfg)
+            level = _terminal_level(cfg, seven_day, drain)
+            _assign_terminal(d, state, snap, cfg, level, drain, now)
+            continue
+
         metrics = _metrics(cfg, seven_day, remaining_h, recent_burn, rate_5h)
         cap = max(cfg.cooldown_abs_rate_pph, cfg.cooldown_required_rate_multiplier * metrics.required_rate)
         d.safe_hour_cap = cap
         _attach_metrics(d, metrics, remaining_h, recent_burn, snap.recent_5h_burn)
 
-        # 硬规则：允许跳档直接到位
-        if seven_day >= cfg.hard_cap_7d_utilization:
-            _finalize(d, state, snap, cfg.band_floor, "hard_cap_7d")
-            continue
-        if snap.five_hour_used is not None and snap.five_hour_used >= cfg.hard_cap_5h_utilization:
-            _finalize(d, state, snap, cfg.band_floor, "hard_cap_5h")
-            continue
-        if seven_day >= cfg.target_7d_utilization:
-            _finalize(d, state, snap, cfg.band_protect, "protect_7d")
+        if seven_day >= cfg.pacing_target_7d_utilization:
+            _finalize(d, state, snap, cfg.band_protect, "protect_7d", mode="pacing")
             continue
         if state.cooldown_until is not None and state.cooldown_until > now:
             target = _most_protective(snap.priority, cfg.band_protect, cfg)
-            _finalize(d, state, snap, target, "cooldown_hold")
+            _finalize(d, state, snap, target, "cooldown_hold", mode="pacing")
             continue
         if _needs_cooldown(cfg, seven_day, remaining_h, recent_burn, metrics, cap):
             state.cooldown_until = now + timedelta(minutes=cfg.cooldown_minutes)
@@ -107,15 +130,11 @@ def decide(
                 if _will_hit_goal_soon(cfg, seven_day, remaining_h, recent_burn)
                 else "new_cooldown"
             )
-            _finalize(d, state, snap, cfg.band_protect, reason)
+            _finalize(d, state, snap, cfg.band_protect, reason, mode="pacing")
             continue
-        if metrics.ahead >= cfg.ahead_band_pp and metrics.projected_end >= cfg.target_7d_utilization:
-            _finalize(d, state, snap, cfg.band_protect, "ahead_protect")
+        if metrics.ahead >= cfg.ahead_band_pp and metrics.projected_end >= cfg.pacing_target_7d_utilization:
+            _finalize(d, state, snap, cfg.band_protect, "ahead_protect", mode="pacing")
             continue
-        if first_takeover_invalid:
-            _finalize(d, state, snap, cfg.band_normal, "takeover")
-            continue
-
         ranking.append(
             _Ranked(
                 snap=snap,
@@ -149,6 +168,22 @@ class _Metrics:
         self.ahead = ahead
 
 
+class _DrainMetrics:
+    def __init__(
+        self,
+        gap: float,
+        deadline_h: float,
+        required_rate: float,
+        recent_rate: float,
+        pressure: float,
+    ):
+        self.gap = gap
+        self.deadline_h = deadline_h
+        self.required_rate = required_rate
+        self.recent_rate = recent_rate
+        self.pressure = pressure
+
+
 class _Ranked:
     def __init__(self, snap, decision, state, seven_day, remaining_h, metrics):
         self.snap: AccountSnapshot = snap
@@ -169,7 +204,7 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
         return
     for r in ranking:
         r.pace_error = r.metrics.target_now - r.seven_day
-        r.projected_gap = cfg.target_7d_utilization - r.metrics.projected_end
+        r.projected_gap = cfg.pacing_target_7d_utilization - r.metrics.projected_end
         r.speed_gap = r.metrics.required_rate - r.metrics.recent_rate
         urgency = 1.0 + _clamp((cfg.emergency_window_hours - r.remaining_h) / cfg.emergency_window_hours, 0.0, 1.0)
         # 预热宽限：窗口刚重置时近期速率≈0 会把 projected_gap 抬虚高，按 elapsed 比例折减
@@ -215,14 +250,14 @@ def _rank_and_assign(ranking: list[_Ranked], eligible_total: int, cfg: Config, n
 
     for r in ranking:
         if r.snap.id in strong_ids:
-            _assign(r, r.decision, cfg.band_normal, "boost", cfg)
+            _assign(r, r.decision, cfg.band_normal, "boost", cfg, now)
         elif r.snap.id in mild_ids:
-            _assign(r, r.decision, cfg.band_normal, "mild_boost", cfg)
+            _assign(r, r.decision, cfg.band_normal, "mild_boost", cfg, now)
         else:
-            _assign(r, r.decision, cfg.band_normal, "normal", cfg)
+            _assign(r, r.decision, cfg.band_normal, "normal", cfg, now)
 
 
-def _assign(r: _Ranked, d: Decision, target: int, reason: str, cfg: Config) -> None:
+def _assign(r: _Ranked, d: Decision, target: int, reason: str, cfg: Config, now: datetime) -> None:
     bands = cfg.priority_bands
     current = d.current_priority if d.current_priority in bands else cfg.band_normal
     ci, ti = bands.index(current), bands.index(target)
@@ -236,28 +271,98 @@ def _assign(r: _Ranked, d: Decision, target: int, reason: str, cfg: Config) -> N
     d.target_priority = target
     d.reason = reason
     d.target_load_factor = _load_factor_for_reason(r, target, reason, cfg)
+    d.mode = "pacing"
     r.state.last_priority = target
     if d.target_load_factor > r.snap.base_load_factor:
-        r.state.last_boost_at = r.snap.sampled_at
+        r.state.last_boost_at = now
 
 
-def _finalize(d: Decision, state: AccountState, snap: AccountSnapshot, target: int, reason: str) -> None:
+def _assign_terminal(
+    d: Decision,
+    state: AccountState,
+    snap: AccountSnapshot,
+    cfg: Config,
+    level: str,
+    metrics: _DrainMetrics,
+    now: datetime,
+) -> None:
+    targets = {
+        "strong": (cfg.band_boost, "terminal_drain_strong"),
+        "mild": (cfg.band_mild, "terminal_drain_mild"),
+        "normal": (cfg.band_normal, "terminal_drain_normal"),
+        "done": (cfg.band_protect, "terminal_done"),
+    }
+    target, reason = targets[level]
+    current = d.current_priority if d.current_priority in cfg.priority_bands else cfg.band_normal
+    if target < current and cfg.priority_bands.index(current) - cfg.priority_bands.index(target) > 1:
+        reason = f"{reason}_jump"
+    d.target_priority = target
+    d.target_load_factor = (
+        snap.base_load_factor
+        if level == "done"
+        else _terminal_load_factor(snap.base_load_factor, level, metrics, cfg)
+    )
+    d.reason = reason
+    d.mode = "terminal"
+    d.drain_level = level
+    state.last_priority = target
+    state.last_terminal_level = level
+    if level in {"strong", "mild"}:
+        state.last_terminal_boost_at = now
+    if d.target_load_factor > snap.base_load_factor:
+        state.last_boost_at = now
+
+
+def _finalize(
+    d: Decision,
+    state: AccountState,
+    snap: AccountSnapshot,
+    target: int,
+    reason: str,
+    mode: str = "",
+) -> None:
     d.target_priority = target
     d.target_load_factor = snap.base_load_factor
     d.reason = reason
+    d.mode = mode
     state.last_priority = target
+
+
+def _hold(d: Decision, snap: AccountSnapshot, reason: str, terminal: bool = False) -> None:
+    d.target_priority = snap.priority
+    d.target_load_factor = snap.base_load_factor if reason.startswith("terminal_") else snap.effective_load_factor
+    d.reason = reason
+    d.mode = "terminal" if terminal else "hold"
 
 
 def _load_factor_for_reason(r: _Ranked, target: int, reason: str, cfg: Config) -> int:
     base = r.snap.base_load_factor
     multiplier = 1.0
-    if target != cfg.band_normal:
-        return base
     if reason.startswith("boost"):
         multiplier = cfg.boost_load_factor_multiplier
     elif reason == "mild_boost":
         multiplier = cfg.mild_load_factor_multiplier
     return max(1, min(cfg.max_load_factor, math.ceil(base * multiplier)))
+
+
+def _terminal_load_factor(base: int, level: str, metrics: _DrainMetrics, cfg: Config) -> int:
+    if not cfg.terminal_dynamic_load_factor_enabled:
+        multipliers = {
+            "strong": cfg.terminal_strong_load_factor_multiplier,
+            "mild": cfg.terminal_mild_load_factor_multiplier,
+            "normal": cfg.terminal_normal_load_factor_multiplier,
+        }
+        multiplier = multipliers[level]
+        return max(1, min(cfg.terminal_max_load_factor, math.ceil(base * multiplier)))
+
+    raw_multiplier = 1.0 + 0.6 * metrics.gap + 2.0 * metrics.required_rate + 0.5 * max(0.0, metrics.pressure - 1.0)
+    caps = {
+        "strong": cfg.terminal_strong_load_factor_multiplier,
+        "mild": cfg.terminal_mild_load_factor_multiplier,
+        "normal": cfg.terminal_normal_load_factor_multiplier,
+    }
+    multiplier = min(raw_multiplier, caps[level])
+    return max(1, min(cfg.terminal_max_load_factor, math.ceil(base * multiplier)))
 
 
 def _update_burn(state: AccountState, snap: AccountSnapshot) -> float | None:
@@ -294,8 +399,8 @@ def _metrics(
     elapsed_h = _clamp(cfg.window_hours - remaining_h, 0.0, cfg.window_hours)
     target_window_h = max(cfg.window_hours - cfg.safe_tail_hours, 1.0)
     runway_h = max(remaining_h - cfg.safe_tail_hours, 1.0)
-    target_now = cfg.target_7d_utilization * min(elapsed_h / target_window_h, 1.0)
-    final_gap = cfg.target_7d_utilization - seven_day
+    target_now = cfg.pacing_target_7d_utilization * min(elapsed_h / target_window_h, 1.0)
+    final_gap = cfg.pacing_target_7d_utilization - seven_day
     required_rate = max(0.0, final_gap) / runway_h
     recent_rate = _weighted_recent_rate(recent_burn, burn_ewma)
     projected_end = seven_day + recent_rate * runway_h
@@ -306,6 +411,27 @@ def _metrics(
         recent_rate=recent_rate,
         projected_end=projected_end,
         ahead=seven_day - target_now,
+    )
+
+
+def _drain_metrics(
+    cfg: Config,
+    seven_day: float,
+    remaining_h: float,
+    recent_burn: float | None,
+    burn_ewma: float | None,
+) -> _DrainMetrics:
+    gap = max(0.0, cfg.drain_target_7d_utilization - seven_day)
+    deadline_h = max(remaining_h - cfg.terminal_final_margin_hours, cfg.terminal_min_runway_hours)
+    required_rate = gap / deadline_h
+    recent_rate = _weighted_recent_rate(recent_burn, burn_ewma)
+    pressure = required_rate / max(recent_rate, cfg.terminal_min_recent_rate_pph)
+    return _DrainMetrics(
+        gap=gap,
+        deadline_h=deadline_h,
+        required_rate=required_rate,
+        recent_rate=recent_rate,
+        pressure=pressure,
     )
 
 
@@ -323,6 +449,47 @@ def _attach_metrics(
     d.required_rate = round(metrics.required_rate, 4)
     d.recent_rate = round(metrics.recent_rate, 4)
     d.remaining_hours = round(remaining_h, 4)
+
+
+def _attach_drain_metrics(
+    d: Decision,
+    metrics: _DrainMetrics,
+    seven_day: float,
+    remaining_h: float,
+    recent_burn: float | None,
+    recent_5h_burn: float | None,
+    cfg: Config,
+) -> None:
+    d.recent_hour_burn = recent_burn
+    d.recent_5h_burn = recent_5h_burn
+    d.safe_hour_cap = None
+    d.target_now = cfg.drain_target_7d_utilization
+    d.projected_end = round(seven_day + metrics.recent_rate * metrics.deadline_h, 4)
+    d.required_rate = round(metrics.required_rate, 4)
+    d.recent_rate = round(metrics.recent_rate, 4)
+    d.remaining_hours = round(remaining_h, 4)
+    d.drain_gap = round(metrics.gap, 4)
+    d.drain_required_rate = round(metrics.required_rate, 4)
+    d.drain_pressure = round(metrics.pressure, 4)
+    d.deadline_hours = round(metrics.deadline_h, 4)
+
+
+def _terminal_level(cfg: Config, seven_day: float, metrics: _DrainMetrics) -> str:
+    if seven_day >= cfg.drain_target_7d_utilization - cfg.terminal_done_band_pp:
+        return "done"
+    if (
+        metrics.gap >= cfg.terminal_strong_gap_pp
+        or metrics.required_rate >= cfg.terminal_strong_required_rate_pph
+        or metrics.pressure >= cfg.terminal_strong_pressure
+    ):
+        return "strong"
+    if (
+        metrics.gap >= cfg.terminal_mild_gap_pp
+        or metrics.required_rate >= cfg.terminal_mild_required_rate_pph
+        or metrics.pressure >= cfg.terminal_mild_pressure
+    ):
+        return "mild"
+    return "normal"
 
 
 def _weighted_recent_rate(rate_1h: float | None, rate_5h: float | None) -> float:
@@ -358,8 +525,15 @@ def _will_hit_goal_soon(
     return (
         recent_burn is not None
         and recent_burn > 0.0
-        and seven_day + recent_burn * min(cfg.will_hit_goal_soon_hours, remaining_h) >= cfg.target_7d_utilization
+        and seven_day + recent_burn * min(cfg.will_hit_goal_soon_hours, remaining_h) >= cfg.pacing_target_7d_utilization
     )
+
+
+def _is_terminal_hint(snap: AccountSnapshot, cfg: Config, now: datetime) -> bool:
+    if not cfg.terminal_drain_enabled or snap.seven_day_reset_at is None:
+        return False
+    remaining_h = (snap.seven_day_reset_at - now).total_seconds() / 3600.0
+    return 0.0 < remaining_h <= cfg.terminal_window_hours
 
 
 def _most_protective(current: int, floor: int, cfg: Config) -> int:

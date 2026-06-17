@@ -57,6 +57,12 @@ def test_snapshot_returns_dashboard_data(tmp_path):
             required_rate=0.7,
             recent_rate=0.4,
             remaining_hours=84.0,
+            mode="terminal",
+            drain_gap=4.0,
+            drain_required_rate=0.7,
+            drain_pressure=1.75,
+            drain_level="strong",
+            deadline_hours=83.75,
             usage_source="passive",
         )
     ], NOW)
@@ -79,7 +85,11 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["accounts"][0]["expected_7d_gap"] == 13.0
     assert data["accounts"][0]["last_current_load_factor"] == 1
     assert data["accounts"][0]["last_target_load_factor"] == 3
+    assert data["accounts"][0]["mode"] == "terminal"
+    assert data["accounts"][0]["drain_level"] == "strong"
+    assert data["accounts"][0]["drain_gap"] == 4.0
     assert data["decisions"][0]["seven_day_reset_at"] == "2026-06-15T22:00:00Z"
+    assert data["decisions"][0]["drain_pressure"] == 1.75
     assert data["decisions"][0]["changed"] is True
 
 

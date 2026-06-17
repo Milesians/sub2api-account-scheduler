@@ -22,7 +22,10 @@ class Config:
 
     interval_minutes: int = 60
     target_7d_utilization: float = 97.0
-    hard_cap_7d_utilization: float = 99.2
+    enable_5h_guard: bool = False
+    pacing_target_7d_utilization: float = 97.0
+    drain_target_7d_utilization: float = 99.4
+    hard_cap_7d_utilization: float = 99.8
     hard_cap_5h_utilization: float = 98.0
     protect_7d_utilization: float = 97.0
     max_boost_ratio: float = 0.15
@@ -48,6 +51,28 @@ class Config:
     emergency_projected_end_threshold: float = 94.0
     emergency_final_gap_pp: float = 5.0
     emergency_rate_gap_pph: float = 0.8
+    terminal_drain_enabled: bool = True
+    terminal_window_hours: float = 36.0
+    terminal_final_margin_hours: float = 0.25
+    terminal_min_runway_hours: float = 0.25
+    terminal_strong_gap_pp: float = 1.5
+    terminal_mild_gap_pp: float = 0.4
+    terminal_strong_required_rate_pph: float = 0.35
+    terminal_mild_required_rate_pph: float = 0.10
+    terminal_strong_pressure: float = 1.8
+    terminal_mild_pressure: float = 0.9
+    terminal_done_band_pp: float = 0.10
+    terminal_min_recent_rate_pph: float = 0.05
+    terminal_dynamic_load_factor_enabled: bool = True
+    terminal_strong_load_factor_multiplier: float = 4.0
+    terminal_mild_load_factor_multiplier: float = 2.5
+    terminal_normal_load_factor_multiplier: float = 1.5
+    terminal_max_load_factor: int = 100
+    terminal_usage_stale_threshold_minutes: int = 20
+    terminal_max_active_probes_per_round: int = 50
+    terminal_active_probe_ratio: float = 0.50
+    terminal_min_active_probes_per_round: int = 20
+    terminal_interval_minutes: int = 15
     priority_bands: tuple[int, ...] = (1010, 1030, 1050, 1070, 1099)
 
     db_path: str = "/data/scheduler.db"
@@ -89,10 +114,12 @@ class Config:
 def load_config(path: str | None = None) -> Config:
     cfg = Config()
     config_path = path or os.environ.get("CONFIG_PATH", "config.yaml")
+    configured_keys: set[str] = set()
 
     if Path(config_path).is_file():
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        configured_keys = set(data)
         valid = {f.name for f in fields(Config)}
         for key, value in data.items():
             if key not in valid:
@@ -100,11 +127,31 @@ def load_config(path: str | None = None) -> Config:
                 continue
             if key == "priority_bands":
                 value = tuple(int(v) for v in value)
-            if key == "ui_enabled":
+            if key in {
+                "account_profile_refresh_enabled",
+                "enable_5h_guard",
+                "terminal_drain_enabled",
+                "terminal_dynamic_load_factor_enabled",
+                "ui_enabled",
+            }:
                 value = _bool(value)
             if key == "ui_frame_ancestor_hosts":
                 value = _string_tuple(value)
             setattr(cfg, key, value)
+
+    if (
+        "pacing_target_7d_utilization" not in configured_keys
+        and "target_7d_utilization" in configured_keys
+    ):
+        cfg.pacing_target_7d_utilization = cfg.target_7d_utilization
+    if "drain_target_7d_utilization" not in configured_keys:
+        cfg.drain_target_7d_utilization = round(
+            max(
+                cfg.pacing_target_7d_utilization,
+                cfg.hard_cap_7d_utilization - 0.4,
+            ),
+            4,
+        )
 
     cfg.base_url = os.environ.get("SUB2API_BASE_URL", cfg.base_url).rstrip("/")
     cfg.admin_key = os.environ.get("SUB2API_ADMIN_KEY", cfg.admin_key)
@@ -132,6 +179,14 @@ def load_config(path: str | None = None) -> Config:
         raise ValueError(f"unsupported platform: {cfg.platform} (anthropic / openai)")
     if len(cfg.priority_bands) != 5 or list(cfg.priority_bands) != sorted(cfg.priority_bands):
         raise ValueError("priority_bands must be 5 ascending values")
+    if cfg.drain_target_7d_utilization >= cfg.hard_cap_7d_utilization:
+        raise ValueError("drain_target_7d_utilization must be lower than hard_cap_7d_utilization")
+    if cfg.pacing_target_7d_utilization > cfg.drain_target_7d_utilization:
+        raise ValueError("pacing_target_7d_utilization must be <= drain_target_7d_utilization")
+    if cfg.terminal_window_hours <= 0:
+        raise ValueError("terminal_window_hours must be positive")
+    if cfg.terminal_final_margin_hours < 0:
+        raise ValueError("terminal_final_margin_hours must be >= 0")
     return cfg
 
 

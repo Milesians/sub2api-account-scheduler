@@ -4,9 +4,12 @@
 platform: openai              # anthropic / openai，每个实例管理一个平台
 account_name_pattern: 'pay\d+'         # 受控账号名称过滤（正则，re.search 匹配）；空 = 全部账号受控
 
-interval_minutes: 60
-target_7d_utilization: 97.0      # 初期保守值，运行观察后再上调
-hard_cap_7d_utilization: 99.2
+interval_minutes: 15
+target_7d_utilization: 97.0      # legacy；未配置 pacing_target_7d_utilization 时用于兼容
+enable_5h_guard: false           # 5h 保护默认交给 sub2api 原生运行时
+pacing_target_7d_utilization: 97.0
+drain_target_7d_utilization: 99.4
+hard_cap_7d_utilization: 99.8
 hard_cap_5h_utilization: 98.0
 protect_7d_utilization: 97.0
 max_boost_ratio: 0.15
@@ -32,6 +35,28 @@ emergency_window_hours: 12       # 剩余小时低于此值允许跳档补量
 emergency_projected_end_threshold: 94.0
 emergency_final_gap_pp: 5.0
 emergency_rate_gap_pph: 0.8
+terminal_drain_enabled: true
+terminal_window_hours: 36.0
+terminal_final_margin_hours: 0.25
+terminal_min_runway_hours: 0.25
+terminal_strong_gap_pp: 1.5
+terminal_mild_gap_pp: 0.4
+terminal_strong_required_rate_pph: 0.35
+terminal_mild_required_rate_pph: 0.10
+terminal_strong_pressure: 1.8
+terminal_mild_pressure: 0.9
+terminal_done_band_pp: 0.10
+terminal_min_recent_rate_pph: 0.05
+terminal_dynamic_load_factor_enabled: true
+terminal_strong_load_factor_multiplier: 4.0
+terminal_mild_load_factor_multiplier: 2.5
+terminal_normal_load_factor_multiplier: 1.5
+terminal_max_load_factor: 100
+terminal_usage_stale_threshold_minutes: 20
+terminal_max_active_probes_per_round: 50
+terminal_active_probe_ratio: 0.50
+terminal_min_active_probes_per_round: 20
+terminal_interval_minutes: 15
 
 # priority 档位：基准 1000，手动管理的账号请使用 < 1000 的 priority，
 # 不会与受控档位冲突（sub2api priority 数值越小越优先）

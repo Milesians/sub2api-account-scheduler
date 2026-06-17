@@ -90,6 +90,9 @@ class AccountState:
     hourly_burn_ewma: float = 0.0
     cooldown_until: datetime | None = None
     last_boost_at: datetime | None = None
+    last_terminal_boost_at: datetime | None = None
+    last_terminal_level: str | None = None
+    last_probe_attempt_at: datetime | None = None
     probe_failures: int = 0
 
 
@@ -115,6 +118,12 @@ class Decision:
     required_rate: float | None = None
     recent_rate: float | None = None
     remaining_hours: float | None = None
+    mode: str = ""
+    drain_gap: float | None = None
+    drain_required_rate: float | None = None
+    drain_pressure: float | None = None
+    drain_level: str | None = None
+    deadline_hours: float | None = None
     usage_source: str = "missing"
     current_load_factor: int = 1
     target_load_factor: int = 1

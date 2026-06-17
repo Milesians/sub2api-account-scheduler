@@ -67,25 +67,43 @@ def neutral_peer(account_id: int) -> AccountSnapshot:
     return mk_snap(account_id, 90.0)
 
 
+def terminal_snap(account_id: int, seven_day: float | None, hours_left: float = 6.0, **kw) -> AccountSnapshot:
+    return mk_snap(account_id, seven_day, seven_day_reset_at=NOW + timedelta(hours=hours_left), **kw)
+
+
+def terminal_state(account_id: int, seven_day: float, hours_left: float = 6.0, **kw) -> AccountState:
+    return mk_state(account_id, seven_day, last_7d_reset_at=NOW + timedelta(hours=hours_left), **kw)
+
+
 def test_hard_cap_7d_jumps_to_floor():
-    d, _ = decide_one(mk_snap(1, 99.5, priority=1010), mk_state(1, 99.0))
+    d, _ = decide_one(mk_snap(1, 99.9, priority=1010), mk_state(1, 99.0))
     assert d.target_priority == 1099
     assert d.reason == "hard_cap_7d"
 
 
-def test_hard_cap_5h_jumps_to_floor():
+def test_hard_cap_5h_ignored_by_default():
     d, _ = decide_one(mk_snap(1, 50.0, five_hour_used=99.5), mk_state(1, 49.5))
+    assert d.reason != "hard_cap_5h"
+    assert d.target_priority != 1099
+
+
+def test_hard_cap_5h_jumps_to_floor_when_guard_enabled():
+    d, _ = decide_one(
+        mk_snap(1, 50.0, five_hour_used=99.5),
+        mk_state(1, 49.5),
+        cfg=mk_cfg(enable_5h_guard=True),
+    )
     assert d.reason == "hard_cap_5h"
     assert d.target_priority == 1099
 
 
 def test_sonnet_window_counts_for_protection():
-    d, _ = decide_one(mk_snap(1, 50.0, seven_day_sonnet_used=99.5), mk_state(1, 49.0))
+    d, _ = decide_one(mk_snap(1, 50.0, seven_day_sonnet_used=99.9), mk_state(1, 49.0))
     assert d.target_priority == 1099
 
 
 def test_protect_7d_at_target():
-    d, _ = decide_one(mk_snap(1, 97.5, priority=1010, load_factor=3), mk_state(1, 97.0))
+    d, _ = decide_one(mk_snap(1, 97.5, priority=1010, load_factor=3), mk_state(1, 97.0), cfg=mk_cfg())
     assert d.target_priority == 1070
     assert d.target_load_factor == 1
     assert d.reason == "protect_7d"
@@ -237,10 +255,10 @@ def test_fresh_reset_does_not_steal_strong_from_behind():
 
 
 def test_emergency_window_allows_band_jump():
-    # 剩余 6h、明显落后：priority 回 normal，补量通过 load_factor 加权。
+    # 禁用 terminal 后保留旧 emergency 行为：priority 回 normal，补量通过 load_factor 加权。
     snap = mk_snap(1, 50.0, priority=1070, seven_day_reset_at=NOW + timedelta(hours=6))
     peer = mk_snap(2, 50.0, seven_day_reset_at=NOW + timedelta(hours=6))
-    cfg = mk_cfg(max_boost_min=2)
+    cfg = mk_cfg(max_boost_min=2, terminal_drain_enabled=False)
     states = {1: mk_state(1, 49.5, last_priority=1070), 2: mk_state(2, 49.5)}
     states[1].last_7d_reset_at = NOW + timedelta(hours=6)
     states[2].last_7d_reset_at = NOW + timedelta(hours=6)
@@ -248,6 +266,57 @@ def test_emergency_window_allows_band_jump():
     assert {d.target_priority for d in decisions} == {1050}
     assert {d.reason for d in decisions} == {"boost"}
     assert {d.target_load_factor for d in decisions} == {3}
+
+
+def test_terminal_drain_strong_uses_boost_band_and_load_factor():
+    snap = terminal_snap(1, 94.0, priority=1070, recent_5h_burn=0.1)
+    d, states = decide_one(snap, terminal_state(1, 93.8, last_priority=1070, hourly_burn_ewma=0.1))
+    assert d.mode == "terminal"
+    assert d.reason == "terminal_drain_strong_jump"
+    assert d.target_priority == 1010
+    assert d.target_load_factor == 4
+    assert d.drain_level == "strong"
+    assert d.drain_gap == 5.4
+    assert states[1].last_terminal_level == "strong"
+    assert states[1].last_terminal_boost_at == NOW
+
+
+def test_terminal_drain_mild_uses_mild_band():
+    snap = terminal_snap(1, 99.0, hours_left=12.0, recent_5h_burn=1.0)
+    d, _ = decide_one(snap, terminal_state(1, 98.8, hours_left=12.0, hourly_burn_ewma=1.0))
+    assert d.reason == "terminal_drain_mild"
+    assert d.target_priority == 1030
+    assert d.target_load_factor == 2
+    assert d.drain_level == "mild"
+
+
+def test_terminal_done_protects_at_drain_target():
+    snap = terminal_snap(1, 99.35, priority=1010, load_factor=4)
+    d, _ = decide_one(snap, terminal_state(1, 99.2))
+    assert d.mode == "terminal"
+    assert d.reason == "terminal_done"
+    assert d.target_priority == 1070
+    assert d.target_load_factor == 1
+
+
+def test_terminal_skips_pacing_target_and_cooldown():
+    state = terminal_state(1, 96.5, cooldown_until=NOW + timedelta(minutes=30))
+    snap = terminal_snap(1, 97.5, priority=1070, recent_5h_burn=0.0)
+    d, _ = decide_one(snap, state)
+    assert d.mode == "terminal"
+    assert d.reason.startswith("terminal_drain")
+    assert d.target_priority == 1010
+    assert d.reason != "protect_7d"
+    assert d.reason != "cooldown_hold"
+
+
+def test_terminal_stale_returns_base_load_factor():
+    snap = terminal_snap(1, 90.0, priority=1010, load_factor=4, sampled_at=NOW - timedelta(minutes=30))
+    d, states = decide_one(snap, terminal_state(1, 89.0))
+    assert d.reason == "terminal_stale_base"
+    assert d.target_priority == 1010
+    assert d.target_load_factor == 1
+    assert states[1].last_7d_used == 89.0
 
 
 def test_behind_account_can_boost_when_5h_high():

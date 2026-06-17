@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .models import AccountControl, AccountProfile, AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS account_state (
     hourly_burn_ewma  REAL NOT NULL DEFAULT 0,
     cooldown_until    TEXT,
     last_boost_at     TEXT,
+    last_terminal_boost_at TEXT,
+    last_terminal_level    TEXT,
+    last_probe_attempt_at  TEXT,
     probe_failures    INTEGER NOT NULL DEFAULT 0,
     updated_at        TEXT NOT NULL
 );
@@ -88,6 +91,12 @@ CREATE TABLE IF NOT EXISTS decision_log (
     required_rate         REAL,
     recent_rate           REAL,
     remaining_hours       REAL,
+    mode                  TEXT,
+    drain_gap             REAL,
+    drain_required_rate   REAL,
+    drain_pressure        REAL,
+    drain_level           TEXT,
+    deadline_hours        REAL,
     usage_source          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_decision_account
@@ -110,11 +119,20 @@ DECISION_LOG_COLUMNS = {
     "required_rate": "REAL",
     "recent_rate": "REAL",
     "remaining_hours": "REAL",
+    "mode": "TEXT",
+    "drain_gap": "REAL",
+    "drain_required_rate": "REAL",
+    "drain_pressure": "REAL",
+    "drain_level": "TEXT",
+    "deadline_hours": "REAL",
     "usage_source": "TEXT",
 }
 
 ACCOUNT_STATE_COLUMNS = {
     "last_boost_at": "TEXT",
+    "last_terminal_boost_at": "TEXT",
+    "last_terminal_level": "TEXT",
+    "last_probe_attempt_at": "TEXT",
 }
 
 USAGE_SAMPLE_COLUMNS = {
@@ -162,6 +180,17 @@ MIGRATIONS = {
            paused      INTEGER NOT NULL DEFAULT 0,
            updated_at  TEXT NOT NULL
        );
+       """,
+    7: """
+       ALTER TABLE account_state ADD COLUMN last_terminal_boost_at TEXT;
+       ALTER TABLE account_state ADD COLUMN last_terminal_level TEXT;
+       ALTER TABLE account_state ADD COLUMN last_probe_attempt_at TEXT;
+       ALTER TABLE decision_log ADD COLUMN mode TEXT;
+       ALTER TABLE decision_log ADD COLUMN drain_gap REAL;
+       ALTER TABLE decision_log ADD COLUMN drain_required_rate REAL;
+       ALTER TABLE decision_log ADD COLUMN drain_pressure REAL;
+       ALTER TABLE decision_log ADD COLUMN drain_level TEXT;
+       ALTER TABLE decision_log ADD COLUMN deadline_hours REAL;
        """,
 }
 
@@ -246,6 +275,9 @@ class Store:
                 hourly_burn_ewma=r["hourly_burn_ewma"],
                 cooldown_until=_from_iso(r["cooldown_until"]),
                 last_boost_at=_from_iso(r["last_boost_at"]),
+                last_terminal_boost_at=_from_iso(r["last_terminal_boost_at"]),
+                last_terminal_level=r["last_terminal_level"],
+                last_probe_attempt_at=_from_iso(r["last_probe_attempt_at"]),
                 probe_failures=r["probe_failures"],
             )
         return states
@@ -254,8 +286,10 @@ class Store:
         self.conn.executemany(
             """INSERT INTO account_state
                (account_id, last_priority, last_7d_used, last_5h_used, last_7d_reset_at,
-                last_sampled_at, hourly_burn_ewma, cooldown_until, last_boost_at, probe_failures, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_sampled_at, hourly_burn_ewma, cooldown_until, last_boost_at,
+                last_terminal_boost_at, last_terminal_level, last_probe_attempt_at,
+                probe_failures, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(account_id) DO UPDATE SET
                  last_priority=excluded.last_priority,
                  last_7d_used=excluded.last_7d_used,
@@ -265,6 +299,9 @@ class Store:
                  hourly_burn_ewma=excluded.hourly_burn_ewma,
                  cooldown_until=excluded.cooldown_until,
                  last_boost_at=excluded.last_boost_at,
+                 last_terminal_boost_at=excluded.last_terminal_boost_at,
+                 last_terminal_level=excluded.last_terminal_level,
+                 last_probe_attempt_at=excluded.last_probe_attempt_at,
                  probe_failures=excluded.probe_failures,
                  updated_at=excluded.updated_at""",
             [
@@ -278,6 +315,9 @@ class Store:
                     s.hourly_burn_ewma,
                     _iso(s.cooldown_until),
                     _iso(s.last_boost_at),
+                    _iso(s.last_terminal_boost_at),
+                    s.last_terminal_level,
+                    _iso(s.last_probe_attempt_at),
                     s.probe_failures,
                     _iso(now),
                 )
@@ -437,8 +477,9 @@ class Store:
                 current_load_factor, target_load_factor, catchup_score, reason,
                 seven_day_used, seven_day_sonnet_used, seven_day_reset_at, five_hour_used,
                 recent_hour_burn, recent_5h_burn, safe_hour_cap, target_now, projected_end,
-                required_rate, recent_rate, remaining_hours, usage_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                required_rate, recent_rate, remaining_hours, mode, drain_gap, drain_required_rate,
+                drain_pressure, drain_level, deadline_hours, usage_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     run_id,
@@ -463,6 +504,12 @@ class Store:
                     d.required_rate,
                     d.recent_rate,
                     d.remaining_hours,
+                    d.mode,
+                    d.drain_gap,
+                    d.drain_required_rate,
+                    d.drain_pressure,
+                    d.drain_level,
+                    d.deadline_hours,
                     d.usage_source,
                 )
                 for d in decisions
