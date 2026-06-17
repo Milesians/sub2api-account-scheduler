@@ -291,11 +291,31 @@ function isSchedulerPaused(account: DashboardAccount) {
   return account.scheduler_paused === true || account.scheduler_paused === 1
 }
 
+function embeddedTokenHeader(): HeadersInit | undefined {
+  const query = new URLSearchParams(window.location.search)
+  const token = query.get('token')?.trim()
+  const srcHost = query.get('src_host')?.trim()
+  const uiMode = query.get('ui_mode')?.trim()
+  const userId = query.get('user_id')?.trim()
+  if (!token) return undefined
+  return {
+    Authorization: `Bearer ${token}`,
+    ...(srcHost ? { 'X-Embedded-Src-Host': srcHost } : {}),
+    ...(uiMode ? { 'X-Embedded-Ui-Mode': uiMode } : {}),
+    ...(userId ? { 'X-Embedded-User-Id': userId } : {})
+  }
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers: HeadersInit = {
+    ...(embeddedTokenHeader() ?? {}),
+    ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(init?.headers ?? {})
+  }
   const response = await fetch(url, {
     cache: 'no-store',
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
-    ...init
+    ...init,
+    headers
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {

@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from scheduler.models import AccountProfile, AccountState, Decision
@@ -11,6 +12,84 @@ from scheduler.ui import snapshot, start_background
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
 RESET = NOW + timedelta(hours=84)
+EMBEDDED_TOKEN = "embedded-admin-token"
+
+
+class ProfileHandler(BaseHTTPRequestHandler):
+    role = "admin"
+    status = "active"
+    user_id = 1
+
+    def do_GET(self):
+        if self.path != "/api/v1/user/profile" or self.headers.get("Authorization") != f"Bearer {EMBEDDED_TOKEN}":
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"code": 401, "message": "unauthorized"}).encode())
+            return
+        body = {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": self.user_id,
+                "role": self.role,
+                "status": self.status,
+                "email": "admin@example.com",
+            },
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _start_profile_server(role="admin", status="active", user_id=1):
+    handler = type(
+        "TestProfileHandler",
+        (ProfileHandler,),
+        {"role": role, "status": status, "user_id": user_id},
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _embedded_url(ui_host, ui_port, src_origin, path="/"):
+    query = urlencode({
+        "user_id": "1",
+        "token": EMBEDDED_TOKEN,
+        "theme": "light",
+        "lang": "zh",
+        "ui_mode": "embedded",
+        "src_host": src_origin,
+        "src_url": f"{src_origin}/custom/page",
+    })
+    return f"http://{ui_host}:{ui_port}{path}?{query}"
+
+
+def _open_embedded(server, src_origin, path="/"):
+    ui_host, ui_port = server.server_address
+    return urlopen(_embedded_url(ui_host, ui_port, src_origin, path), timeout=2)
+
+
+def _auth_cookie(server, src_origin):
+    with _open_embedded(server, src_origin) as resp:
+        return resp.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+
+def _send_profile(handler):
+    body = {
+        "code": 0,
+        "message": "success",
+        "data": {"id": 1, "role": "admin", "status": "active"},
+    }
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.end_headers()
+    handler.wfile.write(json.dumps(body).encode())
 
 
 def test_snapshot_returns_dashboard_data(tmp_path):
@@ -98,6 +177,7 @@ def test_start_background_serves_snapshot(tmp_path):
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
 
+    profile_server = _start_profile_server()
     server = start_background(
         "127.0.0.1",
         0,
@@ -105,19 +185,24 @@ def test_start_background_serves_snapshot(tmp_path):
         str(heartbeat),
         platform="openai",
         account_name_pattern=r"pay\d+",
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
     )
     try:
         host, port = server.server_address
         import json
         from urllib.request import urlopen
 
-        with urlopen(f"http://{host}:{port}/api/snapshot", timeout=2) as resp:
+        src_origin = f"http://127.0.0.1:{profile_server.server_address[1]}"
+        with urlopen(_embedded_url(host, port, src_origin, "/api/snapshot"), timeout=2) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         assert data["config"]["platform"] == "openai"
         assert data["config"]["account_name_pattern"] == r"pay\d+"
     finally:
         server.shutdown()
         server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
 
 
 def test_ui_allows_all_frame_ancestors_by_default(tmp_path):
@@ -125,14 +210,24 @@ def test_ui_allows_all_frame_ancestors_by_default(tmp_path):
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
 
-    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    profile_server = _start_profile_server()
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
     try:
-        host, port = server.server_address
-        with urlopen(f"http://{host}:{port}/", timeout=2) as resp:
+        src_origin = f"http://127.0.0.1:{profile_server.server_address[1]}"
+        with _open_embedded(server, src_origin) as resp:
             assert resp.headers.get("Content-Security-Policy") is None
     finally:
         server.shutdown()
         server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
 
 
 def test_ui_sends_frame_ancestor_whitelist_header(tmp_path):
@@ -140,22 +235,127 @@ def test_ui_sends_frame_ancestor_whitelist_header(tmp_path):
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
 
+    profile_server = _start_profile_server()
     server = start_background(
         "127.0.0.1",
         0,
         str(db),
         str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
         frame_ancestors=("https://example.com", "https://admin.example.com:8443"),
     )
     try:
-        host, port = server.server_address
-        with urlopen(f"http://{host}:{port}/", timeout=2) as resp:
+        src_origin = f"http://127.0.0.1:{profile_server.server_address[1]}"
+        with _open_embedded(server, src_origin) as resp:
             assert resp.headers.get("Content-Security-Policy") == (
                 "frame-ancestors https://example.com https://admin.example.com:8443"
             )
     finally:
         server.shutdown()
         server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
+
+
+def test_embedded_auth_rejects_mismatched_src_host(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    profile_server = _start_profile_server()
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
+    try:
+        host, port = server.server_address
+        try:
+            urlopen(_embedded_url(host, port, "https://evil.example.com", "/api/snapshot"), timeout=2)
+        except HTTPError as e:
+            data = json.loads(e.read().decode("utf-8"))
+            assert e.code == 403
+            assert data["error"] == "invalid embedded source host"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
+
+
+def test_embedded_auth_rejects_non_admin_user(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    profile_server = _start_profile_server(role="user")
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
+    try:
+        host, port = server.server_address
+        src_origin = f"http://127.0.0.1:{profile_server.server_address[1]}"
+        try:
+            urlopen(_embedded_url(host, port, src_origin, "/api/snapshot"), timeout=2)
+        except HTTPError as e:
+            data = json.loads(e.read().decode("utf-8"))
+            assert e.code == 403
+            assert data["error"] == "admin access required"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
+
+
+def test_embedded_auth_accepts_header_fallback(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+
+    profile_server = _start_profile_server()
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        platform="openai",
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
+    try:
+        host, port = server.server_address
+        src_origin = f"http://127.0.0.1:{profile_server.server_address[1]}"
+        req = Request(
+            f"http://{host}:{port}/api/snapshot",
+            headers={
+                "Authorization": f"Bearer {EMBEDDED_TOKEN}",
+                "X-Embedded-Src-Host": src_origin,
+                "X-Embedded-Ui-Mode": "embedded",
+                "X-Embedded-User-Id": "1",
+            },
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assert data["config"]["platform"] == "openai"
+    finally:
+        server.shutdown()
+        server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
 
 
 def test_scheduler_control_route_toggles_paused(tmp_path):
@@ -163,13 +363,22 @@ def test_scheduler_control_route_toggles_paused(tmp_path):
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
 
-    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    profile_server = _start_profile_server()
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
     try:
         host, port = server.server_address
+        cookie = _auth_cookie(server, f"http://127.0.0.1:{profile_server.server_address[1]}")
         req = Request(
             f"http://{host}:{port}/api/accounts/7/scheduler-control",
             data=json.dumps({"paused": True, "sensitive_password": "123456"}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Cookie": cookie},
             method="POST",
         )
         with urlopen(req, timeout=2) as resp:
@@ -185,6 +394,8 @@ def test_scheduler_control_route_toggles_paused(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
 
 
 def test_sensitive_post_rejects_wrong_password(tmp_path):
@@ -192,13 +403,22 @@ def test_sensitive_post_rejects_wrong_password(tmp_path):
     heartbeat = tmp_path / "last_tick"
     Store(str(db)).close()
 
-    server = start_background("127.0.0.1", 0, str(db), str(heartbeat))
+    profile_server = _start_profile_server()
+    server = start_background(
+        "127.0.0.1",
+        0,
+        str(db),
+        str(heartbeat),
+        base_url=f"http://127.0.0.1:{profile_server.server_address[1]}",
+        admin_key="secret",
+    )
     try:
         host, port = server.server_address
+        cookie = _auth_cookie(server, f"http://127.0.0.1:{profile_server.server_address[1]}")
         req = Request(
             f"http://{host}:{port}/api/accounts/7/scheduler-control",
             data=json.dumps({"paused": True, "sensitive_password": "bad"}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Cookie": cookie},
             method="POST",
         )
         try:
@@ -212,6 +432,8 @@ def test_sensitive_post_rejects_wrong_password(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+        profile_server.shutdown()
+        profile_server.server_close()
 
 
 def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
@@ -223,6 +445,9 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
 
     class AdminHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path == "/api/v1/user/profile":
+                _send_profile(self)
+                return
             admin_seen.append((self.path, self.headers.get("x-api-key")))
             body = {
                 "code": 0,
@@ -316,8 +541,10 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
     )
     try:
         host, port = ui_server.server_address
-        req = Request(f"http://{host}:{port}/api/accounts/7/codex/invite-reset/status")
+        src_origin = f"http://127.0.0.1:{admin_server.server_address[1]}"
+        req = Request(_embedded_url(host, port, src_origin, "/api/accounts/7/codex/invite-reset/status"))
         with urlopen(req, timeout=2) as resp:
+            cookie = resp.headers.get("Set-Cookie", "").split(";", 1)[0]
             data = json.loads(resp.read().decode("utf-8"))
         assert data["available_count"] == 1
         assert data["credits"][0]["id"] == "credit-1"
@@ -329,7 +556,7 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
                 "emails": ["a@example.com b@example.com", "A@example.com"],
                 "sensitive_password": "123456",
             }).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Cookie": cookie},
             method="POST",
         )
         with urlopen(req, timeout=2) as resp:
@@ -339,7 +566,7 @@ def test_invite_reset_routes_call_codex_backend_with_exported_token(tmp_path):
         req = Request(
             f"http://{host}:{port}/api/accounts/7/codex/invite-reset/consume",
             data=json.dumps({"credit_id": "credit-1", "sensitive_password": "123456"}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Cookie": cookie},
             method="POST",
         )
         with urlopen(req, timeout=2) as resp:
@@ -375,6 +602,9 @@ def test_invite_reset_refreshes_expired_token_against_mock_admin(tmp_path):
     class AdminHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             nonlocal export_count
+            if self.path == "/api/v1/user/profile":
+                _send_profile(self)
+                return
             export_count += 1
             token = "expired-token" if export_count == 1 else "fresh-token"
             expires_at = "2020-01-01T00:00:00Z" if export_count == 1 else "2099-01-01T00:00:00Z"
@@ -440,7 +670,8 @@ def test_invite_reset_refreshes_expired_token_against_mock_admin(tmp_path):
     )
     try:
         host, port = ui_server.server_address
-        with urlopen(f"http://{host}:{port}/api/accounts/7/codex/invite-reset/status", timeout=2) as resp:
+        src_origin = f"http://127.0.0.1:{admin_server.server_address[1]}"
+        with urlopen(_embedded_url(host, port, src_origin, "/api/accounts/7/codex/invite-reset/status"), timeout=2) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         assert data["available_count"] == 0
         assert refreshed == ["/api/v1/admin/openai/accounts/7/refresh"]
@@ -461,6 +692,9 @@ def test_invite_reset_upstream_failure_returns_json_424(tmp_path):
 
     class AdminHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path == "/api/v1/user/profile":
+                _send_profile(self)
+                return
             body = {
                 "code": 0,
                 "message": "success",
@@ -499,7 +733,8 @@ def test_invite_reset_upstream_failure_returns_json_424(tmp_path):
     )
     try:
         host, port = ui_server.server_address
-        req = Request(f"http://{host}:{port}/api/accounts/7/codex/invite-reset/status")
+        src_origin = f"http://127.0.0.1:{admin_server.server_address[1]}"
+        req = Request(_embedded_url(host, port, src_origin, "/api/accounts/7/codex/invite-reset/status"))
         try:
             urlopen(req, timeout=2)
         except HTTPError as e:

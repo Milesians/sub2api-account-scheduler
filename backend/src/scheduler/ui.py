@@ -6,18 +6,25 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import secrets
 import sqlite3
 import threading
+import time
 from datetime import UTC, datetime
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+import requests
 
 from .api import AdminAPI
 from .config import load_config
@@ -26,6 +33,27 @@ from .store import Store
 
 STATIC_DIR = Path(__file__).with_name("frontend")
 DEFAULT_SENSITIVE_ACTION_PASSWORD = "123456"
+EMBEDDED_SESSION_COOKIE = "scheduler_embedded_admin"
+EMBEDDED_SESSION_TTL_SECONDS = 12 * 60 * 60
+EMBEDDED_AUTH_TIMEOUT_SECONDS = 5.0
+
+
+class _AuthResult:
+    def __init__(
+        self,
+        ok: bool,
+        status: HTTPStatus = HTTPStatus.OK,
+        error: str = "",
+    ) -> None:
+        self.ok = ok
+        self.status = status
+        self.error = error
+
+
+class _AuthError(Exception):
+    def __init__(self, status: HTTPStatus, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 HTML = """<!doctype html>
@@ -594,10 +622,17 @@ def _handler(
     api = AdminAPI(base_url, admin_key) if base_url and admin_key else None
     invite = CodexInviteReset(api, codex_invite_base_url or os.environ.get("CODEX_INVITE_RESET_BASE_URL", "")) if api else None
     frame_ancestors_header = _frame_ancestors_header(frame_ancestors)
+    expected_src_origin = _origin(base_url)
+    session_secret = _session_secret(admin_key)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
+            if _requires_embedded_auth(parsed.path):
+                auth = self._embedded_auth(parsed)
+                if not auth.ok:
+                    self._send_json(auth.status, {"error": auth.error})
+                    return
             if parsed.path == "/api/snapshot":
                 limit = _limit(parse_qs(parsed.query).get("limit"))
                 body = json.dumps(
@@ -614,6 +649,10 @@ def _handler(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            auth = self._embedded_auth(parsed)
+            if not auth.ok:
+                self._send_json(auth.status, {"error": auth.error})
+                return
             if self._handle_scheduler_control_post(parsed.path):
                 return
             if self._handle_invite_reset_post(parsed.path, invite):
@@ -622,6 +661,51 @@ def _handler(
 
         def log_message(self, format: str, *args: object) -> None:
             return
+
+        def _embedded_auth(self, parsed: Any) -> "_AuthResult":
+            if not expected_src_origin:
+                return _AuthResult(False, HTTPStatus.SERVICE_UNAVAILABLE, "sub2api base url is not configured")
+            if self._valid_embedded_session():
+                return _AuthResult(True)
+            token, src_host, ui_mode, user_id = self._embedded_auth_values(parsed)
+            if ui_mode != "embedded":
+                return _AuthResult(False, HTTPStatus.UNAUTHORIZED, "embedded ui_mode is required")
+            if _origin(src_host) != expected_src_origin:
+                return _AuthResult(False, HTTPStatus.FORBIDDEN, "invalid embedded source host")
+            if not token:
+                return _AuthResult(False, HTTPStatus.UNAUTHORIZED, "embedded token is required")
+            try:
+                profile = _validate_sub2api_admin(base_url, token, user_id)
+            except _AuthError as e:
+                return _AuthResult(False, e.status, str(e))
+            self._set_embedded_session(profile["user_id"])
+            return _AuthResult(True)
+
+        def _embedded_auth_values(self, parsed: Any) -> tuple[str, str, str, str]:
+            query = parse_qs(parsed.query)
+            token = _single_query_value(query, "token")
+            src_host = _single_query_value(query, "src_host")
+            ui_mode = _single_query_value(query, "ui_mode")
+            user_id = _single_query_value(query, "user_id")
+            if token:
+                return token, src_host, ui_mode, user_id
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+            return (
+                token,
+                self.headers.get("X-Embedded-Src-Host", "").strip(),
+                self.headers.get("X-Embedded-Ui-Mode", "").strip(),
+                self.headers.get("X-Embedded-User-Id", "").strip(),
+            )
+
+        def _valid_embedded_session(self) -> bool:
+            cookie = self.headers.get("Cookie", "")
+            session = _cookie_value(cookie, EMBEDDED_SESSION_COOKIE)
+            return _verify_session(session, session_secret) is not None
+
+        def _set_embedded_session(self, user_id: str) -> None:
+            self._pending_embedded_session = _make_session(user_id, session_secret)
 
         def _handle_invite_reset_get(self, path: str, invite: CodexInviteReset | None) -> bool:
             account_id, action = _parse_invite_reset_path(path)
@@ -721,6 +805,7 @@ def _handler(
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self._send_frame_ancestors_header()
+            self._send_embedded_session_header()
             self.end_headers()
             self.wfile.write(data)
             return True
@@ -735,12 +820,26 @@ def _handler(
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self._send_frame_ancestors_header()
+            self._send_embedded_session_header()
             self.end_headers()
             self.wfile.write(data)
 
         def _send_frame_ancestors_header(self) -> None:
             if frame_ancestors_header:
                 self.send_header("Content-Security-Policy", frame_ancestors_header)
+
+        def _send_embedded_session_header(self) -> None:
+            session = getattr(self, "_pending_embedded_session", "")
+            if session:
+                self.send_header(
+                    "Set-Cookie",
+                    (
+                        f"{EMBEDDED_SESSION_COOKIE}={session}; "
+                        f"Max-Age={EMBEDDED_SESSION_TTL_SECONDS}; Path=/; HttpOnly; "
+                        "Secure; SameSite=None"
+                    ),
+                )
+                self._pending_embedded_session = ""
 
     return Handler
 
@@ -789,6 +888,15 @@ def _static_path(path: str) -> Path | None:
     except ValueError:
         return None
     return full
+
+
+def _requires_embedded_auth(path: str) -> bool:
+    if path == "/" or path.startswith("/api/"):
+        return True
+    static_path = _static_path(path)
+    if static_path is not None and static_path.is_file():
+        return False
+    return "." not in Path(path).name
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -863,6 +971,114 @@ def _limit(values: list[str] | None) -> int:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _single_query_value(query: dict[str, list[str]], key: str) -> str:
+    values = query.get(key) or []
+    return values[0].strip() if values else ""
+
+
+def _origin(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    host = parsed.hostname or ""
+    if not host:
+        return ""
+    port = parsed.port
+    default_port = (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)
+    netloc = host if port is None or default_port else f"{host}:{port}"
+    return f"{parsed.scheme}://{netloc}"
+
+
+def _validate_sub2api_admin(base_url: str, token: str, user_id: str) -> dict[str, str]:
+    url = f"{base_url.rstrip('/')}/api/v1/user/profile"
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=EMBEDDED_AUTH_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as e:
+        raise _AuthError(HTTPStatus.BAD_GATEWAY, "failed to validate embedded token") from e
+    if resp.status_code == 401:
+        raise _AuthError(HTTPStatus.UNAUTHORIZED, "invalid embedded token")
+    if resp.status_code >= 400:
+        raise _AuthError(HTTPStatus.BAD_GATEWAY, "sub2api auth validation failed")
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise _AuthError(HTTPStatus.BAD_GATEWAY, "invalid sub2api auth response") from e
+    profile = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), dict) else body
+    if not isinstance(profile, dict):
+        raise _AuthError(HTTPStatus.BAD_GATEWAY, "invalid sub2api auth response")
+    profile_user_id = str(profile.get("id") or "").strip()
+    if not profile_user_id or profile_user_id != user_id.strip():
+        raise _AuthError(HTTPStatus.FORBIDDEN, "embedded user_id does not match token")
+    if str(profile.get("role") or "").strip().lower() != "admin":
+        raise _AuthError(HTTPStatus.FORBIDDEN, "admin access required")
+    if str(profile.get("status") or "").strip().lower() != "active":
+        raise _AuthError(HTTPStatus.FORBIDDEN, "user account is not active")
+    return {"user_id": profile_user_id}
+
+
+def _session_secret(admin_key: str) -> bytes:
+    secret = os.environ.get("UI_SESSION_SECRET") or admin_key
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+def _make_session(user_id: str, secret: bytes) -> str:
+    expires_at = str(int(time.time()) + EMBEDDED_SESSION_TTL_SECONDS)
+    payload = f"{user_id}:{expires_at}"
+    sig = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).digest()
+    raw = f"{payload}:{_b64(sig)}"
+    return _b64(raw.encode("utf-8"))
+
+
+def _verify_session(session: str, secret: bytes) -> str | None:
+    if not session:
+        return None
+    try:
+        raw = _b64decode(session).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return None
+    user_id, expires_at, sig = parts
+    try:
+        if int(expires_at) < int(time.time()):
+            return None
+    except ValueError:
+        return None
+    payload = f"{user_id}:{expires_at}"
+    expected = _b64(hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return user_id
+
+
+def _cookie_value(raw_cookie: str, name: str) -> str:
+    if not raw_cookie:
+        return ""
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw_cookie)
+    except Exception:
+        return ""
+    morsel = cookie.get(name)
+    return morsel.value if morsel else ""
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64decode(data: str) -> bytes:
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
 
 
 if __name__ == "__main__":
