@@ -362,3 +362,54 @@ def test_unmanaged_band_priority_steps_from_normal():
     d, _ = decide_one(snap, mk_state(1, 9.5, last_priority=200), peers=[neutral_peer(2)])
     assert d.target_priority == 1050
     assert d.target_load_factor == 3
+
+
+def test_terminal_stale_from_protect_normalizes_when_usage_below_drain_target():
+    snap = terminal_snap(
+        1,
+        90.0,
+        priority=1070,
+        load_factor=1,
+        sampled_at=NOW - timedelta(minutes=30),
+    )
+
+    d, states = decide_one(snap, terminal_state(1, 89.0, last_priority=1070))
+
+    assert d.mode == "terminal"
+    assert d.reason == "terminal_stale_normalize"
+    assert d.target_priority == 1050
+    assert d.target_load_factor == 1
+    assert states[1].last_7d_used == 89.0
+    assert states[1].last_priority == 1050
+
+
+def test_terminal_stale_keeps_protect_when_old_usage_near_drain_target():
+    snap = terminal_snap(
+        1,
+        99.35,
+        priority=1070,
+        load_factor=1,
+        sampled_at=NOW - timedelta(minutes=30),
+    )
+
+    d, _ = decide_one(snap, terminal_state(1, 99.2, last_priority=1070))
+
+    assert d.reason == "terminal_stale_base"
+    assert d.target_priority == 1070
+    assert d.target_load_factor == 1
+
+
+def test_pacing_step_from_floor_to_protect_does_not_keep_boost_load_factor():
+    snap = mk_snap(1, 10.0, priority=1099, load_factor=1)
+    state = mk_state(1, 9.5, last_priority=1099)
+
+    d, _ = decide_one(
+        snap,
+        state,
+        cfg=mk_cfg(terminal_drain_enabled=False),
+        peers=[neutral_peer(2)],
+    )
+
+    assert d.reason == "boost"
+    assert d.target_priority == 1070
+    assert d.target_load_factor == 1

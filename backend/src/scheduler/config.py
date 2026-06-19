@@ -177,6 +177,10 @@ def load_config(path: str | None = None) -> Config:
         raise ValueError("SUB2API_BASE_URL and SUB2API_ADMIN_KEY are required (env)")
     if cfg.platform not in ("anthropic", "openai"):
         raise ValueError(f"unsupported platform: {cfg.platform} (anthropic / openai)")
+    if cfg.interval_minutes <= 0:
+        raise ValueError("interval_minutes must be positive")
+    if cfg.terminal_interval_minutes <= 0:
+        raise ValueError("terminal_interval_minutes must be positive")
     if len(cfg.priority_bands) != 5 or list(cfg.priority_bands) != sorted(cfg.priority_bands):
         raise ValueError("priority_bands must be 5 ascending values")
     if cfg.drain_target_7d_utilization >= cfg.hard_cap_7d_utilization:
@@ -187,6 +191,16 @@ def load_config(path: str | None = None) -> Config:
         raise ValueError("terminal_window_hours must be positive")
     if cfg.terminal_final_margin_hours < 0:
         raise ValueError("terminal_final_margin_hours must be >= 0")
+    if cfg.max_active_probes_per_round < 0:
+        raise ValueError("max_active_probes_per_round must be >= 0")
+    if cfg.terminal_min_active_probes_per_round < 0:
+        raise ValueError("terminal_min_active_probes_per_round must be >= 0")
+    if cfg.terminal_max_active_probes_per_round < cfg.terminal_min_active_probes_per_round:
+        raise ValueError(
+            "terminal_max_active_probes_per_round must be >= terminal_min_active_probes_per_round"
+        )
+    if cfg.terminal_active_probe_ratio < 0:
+        raise ValueError("terminal_active_probe_ratio must be >= 0")
     return cfg
 
 

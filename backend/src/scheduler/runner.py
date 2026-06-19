@@ -33,7 +33,7 @@ MANAGED_ACCOUNT_TYPES = {
 }
 
 
-def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
+def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
     now = datetime.now(UTC)
     run_id = uuid.uuid4().hex[:12]
     states = store.load_states()
@@ -57,17 +57,21 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
 
     probed = _probe_stale(eligible, states, cfg, api, now)
     store.attach_recent_5h_burn(eligible)
+    terminal_active = any(_is_terminal_snapshot(s, cfg, now) for s in eligible)
 
     decisions, new_states = decide(eligible, states, cfg, now)
 
     for d in sorted(decisions, key=lambda x: x.account_id):
         log.info(
             "run=%s decision account=%d(%s) priority=%d->%d load_factor=%d->%d "
-            "reason=%s 7d=%s sonnet=%s 5h=%s catchup=%s burn=%s cap=%s src=%s",
+            "mode=%s reason=%s 7d=%s sonnet=%s 5h=%s catchup=%s burn=%s cap=%s "
+            "drain_gap=%s drain_rate=%s drain_pressure=%s drain_level=%s deadline=%s src=%s",
             run_id, d.account_id, d.name, d.current_priority, d.target_priority,
-            d.current_load_factor, d.target_load_factor, d.reason,
+            d.current_load_factor, d.target_load_factor, d.mode, d.reason,
             _fmt(d.seven_day_used), _fmt(d.seven_day_sonnet_used), _fmt(d.five_hour_used),
-            _fmt(d.catchup_score), _fmt(d.recent_hour_burn), _fmt(d.safe_hour_cap), d.usage_source,
+            _fmt(d.catchup_score), _fmt(d.recent_hour_burn), _fmt(d.safe_hour_cap),
+            _fmt(d.drain_gap), _fmt(d.drain_required_rate), _fmt(d.drain_pressure), d.drain_level or "-",
+            _fmt(d.deadline_hours), d.usage_source,
         )
 
     updated = 0
@@ -91,7 +95,8 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> None:
     store.add_decisions(run_id, decisions, now)
     store.prune(cfg.sample_retention_days, cfg.decision_retention_days, cfg.state_retention_days)
 
-    log.info("run=%s done probes=%d updated=%d", run_id, probed, updated)
+    log.info("run=%s done probes=%d updated=%d terminal_active=%s", run_id, probed, updated, terminal_active)
+    return terminal_active
 
 
 def _probe_stale(
@@ -159,9 +164,9 @@ def _probe_budget(
         cfg.terminal_min_active_probes_per_round,
         math.ceil(terminal_total * cfg.terminal_active_probe_ratio),
     )
-    return max(
-        cfg.max_active_probes_per_round,
-        min(cfg.terminal_max_active_probes_per_round, terminal_budget),
+    return min(
+        cfg.terminal_max_active_probes_per_round,
+        max(cfg.max_active_probes_per_round, terminal_budget),
     )
 
 
@@ -285,16 +290,23 @@ def run(cfg: Config, once: bool = False) -> None:
     store = Store(cfg.db_path)
     try:
         while True:
+            terminal_active = False
             try:
-                tick(cfg, api, store)
+                terminal_active = tick(cfg, api, store)
                 _touch_heartbeat(cfg.heartbeat_file)
             except Exception:
                 log.exception("tick failed")
             if once:
                 return
-            time.sleep(cfg.interval_minutes * 60)
+            time.sleep(_sleep_minutes(cfg, terminal_active) * 60)
     finally:
         store.close()
+
+
+def _sleep_minutes(cfg: Config, terminal_active: bool) -> int:
+    if terminal_active and cfg.terminal_drain_enabled:
+        return max(1, cfg.terminal_interval_minutes)
+    return max(1, cfg.interval_minutes)
 
 
 def _touch_heartbeat(path: str) -> None:

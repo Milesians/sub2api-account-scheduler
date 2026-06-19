@@ -58,7 +58,14 @@ def decide(
             if first_takeover_invalid:
                 _finalize(d, state, snap, cfg.band_normal, "takeover", mode="hold")
             else:
-                _hold(d, snap, "terminal_no_data_base" if terminal_hint else "no_data_hold", terminal_hint)
+                _hold(
+                    d,
+                    snap,
+                    "terminal_no_data_base" if terminal_hint else "no_data_hold",
+                    terminal_hint,
+                    cfg,
+                    state,
+                )
             continue
         stale_threshold = (
             cfg.terminal_usage_stale_threshold_minutes
@@ -69,7 +76,14 @@ def decide(
             if first_takeover_invalid:
                 _finalize(d, state, snap, cfg.band_normal, "takeover", mode="hold")
             else:
-                _hold(d, snap, "terminal_stale_base" if terminal_hint else "stale_hold", terminal_hint)
+                _hold(
+                    d,
+                    snap,
+                    "terminal_stale_base" if terminal_hint else "stale_hold",
+                    terminal_hint,
+                    cfg,
+                    state,
+                )
             continue
 
         seven_day = max(snap.seven_day_used, snap.seven_day_sonnet_used or 0.0)
@@ -328,15 +342,41 @@ def _finalize(
     state.last_priority = target
 
 
-def _hold(d: Decision, snap: AccountSnapshot, reason: str, terminal: bool = False) -> None:
+def _hold(
+    d: Decision,
+    snap: AccountSnapshot,
+    reason: str,
+    terminal: bool = False,
+    cfg: Config | None = None,
+    state: AccountState | None = None,
+) -> None:
     d.target_priority = snap.priority
     d.target_load_factor = snap.base_load_factor if reason.startswith("terminal_") else snap.effective_load_factor
     d.reason = reason
     d.mode = "terminal" if terminal else "hold"
 
+    if (
+        terminal
+        and cfg is not None
+        and reason == "terminal_stale_base"
+        and snap.seven_day_used is not None
+        and snap.seven_day_used < cfg.drain_target_7d_utilization - cfg.terminal_done_band_pp
+        and snap.priority > cfg.band_normal
+    ):
+        d.target_priority = cfg.band_normal
+        d.reason = "terminal_stale_normalize"
+        if state is not None:
+            state.last_priority = cfg.band_normal
+
 
 def _load_factor_for_reason(r: _Ranked, target: int, reason: str, cfg: Config) -> int:
     base = r.snap.base_load_factor
+
+    # pacing 阶段只有真正回到 normal 档才加 load_factor；
+    # terminal drain 阶段走 _terminal_load_factor，不受这里影响。
+    if target != cfg.band_normal:
+        return base
+
     multiplier = 1.0
     if reason.startswith("boost"):
         multiplier = cfg.boost_load_factor_multiplier

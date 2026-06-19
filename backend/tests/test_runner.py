@@ -107,3 +107,81 @@ def test_terminal_probe_score_prioritizes_gap_and_protective_band():
     less_urgent = stale_snap(2, sampled_at=NOW - timedelta(minutes=25), seven_day=99.3, reset_hours=20)
 
     assert runner._probe_score(urgent, None, cfg, NOW) > runner._probe_score(less_urgent, None, cfg, NOW)
+
+
+def test_probe_budget_respects_terminal_max_when_regular_budget_is_larger():
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        max_active_probes_per_round=100,
+        terminal_min_active_probes_per_round=10,
+        terminal_max_active_probes_per_round=30,
+        terminal_active_probe_ratio=1.0,
+    )
+    terminal = [
+        stale_snap(i, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0, reset_hours=6)
+        for i in range(1, 50)
+    ]
+
+    assert runner._probe_budget(terminal, terminal, cfg, NOW) == 30
+
+
+def test_tick_returns_terminal_active_when_eligible_account_is_in_drain_window(tmp_path):
+    class TerminalAPI(FakeAPI):
+        def list_accounts(self, platform):
+            now = datetime.now(UTC)
+            account = super().list_accounts(platform)[0]
+            account["extra"] = {
+                **account["extra"],
+                "codex_7d_used_percent": 90.0,
+                "codex_7d_reset_at": (now + timedelta(hours=6)).isoformat().replace("+00:00", "Z"),
+                "codex_usage_updated_at": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            }
+            return [account]
+
+    db = tmp_path / "scheduler.db"
+    store = Store(str(db))
+    api = TerminalAPI()
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        account_profile_refresh_enabled=False,
+    )
+
+    try:
+        terminal_active = runner.tick(cfg, api, store)
+    finally:
+        store.close()
+
+    assert terminal_active is True
+
+
+def test_sleep_minutes_switches_to_terminal_interval_only_when_terminal_active():
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        interval_minutes=60,
+        terminal_interval_minutes=15,
+    )
+
+    assert runner._sleep_minutes(cfg, terminal_active=True) == 15
+    assert runner._sleep_minutes(cfg, terminal_active=False) == 60
+
+    cfg.terminal_drain_enabled = False
+    assert runner._sleep_minutes(cfg, terminal_active=True) == 60
+
+
+def test_sleep_minutes_has_minimum_one_minute():
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        interval_minutes=0,
+        terminal_interval_minutes=0,
+    )
+
+    assert runner._sleep_minutes(cfg, terminal_active=False) == 1
+    assert runner._sleep_minutes(cfg, terminal_active=True) == 1
