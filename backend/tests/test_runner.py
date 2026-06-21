@@ -67,6 +67,8 @@ def test_tick_probes_paused_accounts_without_scheduling(tmp_path):
 
     assert 7 in states
     assert states[7].last_7d_used == 31.0
+    assert states[7].current_priority == 1050
+    assert states[7].current_load_factor == 1
     assert states[7].last_probe_attempt_at is not None
     assert decisions == 0
     assert [dict(row) for row in samples] == [{"source": "active", "seven_day_used": 31.0}]

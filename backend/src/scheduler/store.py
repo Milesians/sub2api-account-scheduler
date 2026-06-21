@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .models import AccountControl, AccountProfile, AccountSnapshot, AccountState, Decision
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS account_state (
     account_id        INTEGER PRIMARY KEY,
     last_priority     INTEGER,
+    current_priority  INTEGER,
+    current_load_factor INTEGER,
     last_7d_used      REAL,
     last_5h_used      REAL,
     last_7d_reset_at  TEXT,
@@ -129,6 +131,8 @@ DECISION_LOG_COLUMNS = {
 }
 
 ACCOUNT_STATE_COLUMNS = {
+    "current_priority": "INTEGER",
+    "current_load_factor": "INTEGER",
     "last_boost_at": "TEXT",
     "last_terminal_boost_at": "TEXT",
     "last_terminal_level": "TEXT",
@@ -191,6 +195,10 @@ MIGRATIONS = {
        ALTER TABLE decision_log ADD COLUMN drain_pressure REAL;
        ALTER TABLE decision_log ADD COLUMN drain_level TEXT;
        ALTER TABLE decision_log ADD COLUMN deadline_hours REAL;
+       """,
+    8: """
+       ALTER TABLE account_state ADD COLUMN current_priority INTEGER;
+       ALTER TABLE account_state ADD COLUMN current_load_factor INTEGER;
        """,
 }
 
@@ -268,6 +276,8 @@ class Store:
             states[r["account_id"]] = AccountState(
                 account_id=r["account_id"],
                 last_priority=r["last_priority"],
+                current_priority=r["current_priority"],
+                current_load_factor=r["current_load_factor"],
                 last_7d_used=r["last_7d_used"],
                 last_5h_used=r["last_5h_used"],
                 last_7d_reset_at=_from_iso(r["last_7d_reset_at"]),
@@ -285,13 +295,16 @@ class Store:
     def save_states(self, states: list[AccountState], now: datetime) -> None:
         self.conn.executemany(
             """INSERT INTO account_state
-               (account_id, last_priority, last_7d_used, last_5h_used, last_7d_reset_at,
+               (account_id, last_priority, current_priority, current_load_factor,
+                last_7d_used, last_5h_used, last_7d_reset_at,
                 last_sampled_at, hourly_burn_ewma, cooldown_until, last_boost_at,
                 last_terminal_boost_at, last_terminal_level, last_probe_attempt_at,
                 probe_failures, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(account_id) DO UPDATE SET
                  last_priority=excluded.last_priority,
+                 current_priority=excluded.current_priority,
+                 current_load_factor=excluded.current_load_factor,
                  last_7d_used=excluded.last_7d_used,
                  last_5h_used=excluded.last_5h_used,
                  last_7d_reset_at=excluded.last_7d_reset_at,
@@ -308,6 +321,8 @@ class Store:
                 (
                     s.account_id,
                     s.last_priority,
+                    s.current_priority,
+                    s.current_load_factor,
                     s.last_7d_used,
                     s.last_5h_used,
                     _iso(s.last_7d_reset_at),

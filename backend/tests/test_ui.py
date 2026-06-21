@@ -103,6 +103,8 @@ def test_snapshot_returns_dashboard_data(tmp_path):
         AccountState(
             account_id=7,
             last_priority=1050,
+            current_priority=1050,
+            current_load_factor=3,
             last_7d_used=42.0,
             last_7d_reset_at=RESET,
             last_5h_used=12.0,
@@ -161,6 +163,8 @@ def test_snapshot_returns_dashboard_data(tmp_path):
     assert data["accounts"][0]["scheduler_paused"] == 1
     assert data["accounts"][0]["scheduler_control_updated_at"] == "2026-06-12T10:00:00Z"
     assert data["accounts"][0]["last_7d_reset_at"] == "2026-06-15T22:00:00Z"
+    assert data["accounts"][0]["current_priority"] == 1050
+    assert data["accounts"][0]["current_load_factor"] == 3
     assert data["accounts"][0]["expected_7d_used"] == 55.0
     assert data["accounts"][0]["expected_7d_gap"] == 13.0
     assert data["accounts"][0]["last_current_load_factor"] == 1

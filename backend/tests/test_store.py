@@ -16,6 +16,8 @@ def test_store_migrates_and_persists_new_state_fields(tmp_path):
         state = AccountState(
             account_id=1,
             last_priority=1030,
+            current_priority=1050,
+            current_load_factor=3,
             last_boost_at=NOW,
             last_terminal_boost_at=NOW,
             last_terminal_level="strong",
@@ -24,6 +26,8 @@ def test_store_migrates_and_persists_new_state_fields(tmp_path):
         store.save_states([state], NOW)
 
         loaded = store.load_states()[1]
+        assert loaded.current_priority == 1050
+        assert loaded.current_load_factor == 3
         assert loaded.last_boost_at == NOW
         assert loaded.last_terminal_boost_at == NOW
         assert loaded.last_terminal_level == "strong"

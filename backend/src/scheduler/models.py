@@ -83,6 +83,8 @@ class AccountState:
 
     account_id: int
     last_priority: int | None = None
+    current_priority: int | None = None
+    current_load_factor: int | None = None
     last_7d_used: float | None = None
     last_5h_used: float | None = None
     last_7d_reset_at: datetime | None = None

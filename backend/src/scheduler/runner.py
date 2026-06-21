@@ -74,6 +74,7 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
         )
 
     updated = 0
+    snap_by_id = {s.id: s for s in managed}
     update_groups: dict[tuple[int, int], list[int]] = {}
     for d in decisions:
         if d.changed:
@@ -82,6 +83,10 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
     for (priority, load_factor), ids in update_groups.items():
         if api.bulk_update_accounts(ids, {"priority": priority, "load_factor": load_factor}):
             updated += len(ids)
+            for account_id in ids:
+                if account_id in snap_by_id:
+                    snap_by_id[account_id].priority = priority
+                    snap_by_id[account_id].load_factor = load_factor
         else:
             # 更新失败不重试；回退 last_priority，下轮以 list 真实值重新决策
             for account_id in ids:
@@ -179,16 +184,18 @@ def _save_managed_states(
     now: datetime,
 ) -> None:
     for snap in managed:
-        if snap.id in new_states:
-            continue
-        state = states.get(snap.id) or AccountState(account_id=snap.id)
-        state.last_priority = snap.priority
+        state = new_states.get(snap.id)
+        if state is None:
+            state = states.get(snap.id) or AccountState(account_id=snap.id)
+            state.last_priority = snap.priority
+            new_states[snap.id] = state
+        state.current_priority = snap.priority
+        state.current_load_factor = snap.effective_load_factor
         if snap.seven_day_used is not None and snap.sampled_at is not None:
             state.last_7d_used = snap.seven_day_used
             state.last_5h_used = snap.five_hour_used
             state.last_7d_reset_at = snap.seven_day_reset_at
             state.last_sampled_at = snap.sampled_at
-        new_states[snap.id] = state
 
 
 def _sync_account_profiles(

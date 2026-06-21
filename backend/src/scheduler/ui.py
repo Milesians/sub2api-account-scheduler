@@ -546,6 +546,8 @@ def snapshot(
               s.account_id,
               COALESCE(d.account_name, '') AS name,
               s.last_priority,
+              s.current_priority,
+              s.current_load_factor,
               s.last_7d_used,
               s.last_7d_reset_at,
               s.last_5h_used,

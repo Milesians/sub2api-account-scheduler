@@ -22,10 +22,13 @@ interface DashboardAccount {
   scheduler_paused: number | boolean | null
   scheduler_control_updated_at: string | null
   last_priority: number | null
+  current_priority: number | null
+  current_load_factor: number | null
   last_current_priority: number | null
   last_target_priority: number | null
   last_current_load_factor: number | null
   last_target_load_factor: number | null
+  last_decided_at: string | null
   last_7d_used: number | null
   expected_7d_used: number | null
   expected_7d_gap: number | null
@@ -268,10 +271,26 @@ function lfClass(account: DashboardAccount) {
   return ''
 }
 
-function priorityText(account: DashboardAccount) {
-  const current = account.last_current_priority ?? account.last_priority
-  const target = account.last_target_priority ?? account.last_priority
-  return `${current ?? '-'} -> ${target ?? '-'}`
+function currentLoadFactor(account: DashboardAccount) {
+  return account.current_load_factor ?? account.last_target_load_factor ?? account.last_current_load_factor
+}
+
+function currentPriority(account: DashboardAccount) {
+  return account.current_priority ?? account.last_target_priority ?? account.last_priority
+}
+
+function changeTitle(label: string, current: number | null | undefined, target: number | null | undefined, decidedAt: string | null | undefined) {
+  if (current === null || current === undefined || target === null || target === undefined) return ''
+  const time = decidedAt ? ` / ${fmtTime(decidedAt)}` : ''
+  return `上次${label}决策：${current} -> ${target}${time}`
+}
+
+function lfChangeTitle(account: DashboardAccount) {
+  return changeTitle('LF', account.last_current_load_factor, account.last_target_load_factor, account.last_decided_at)
+}
+
+function priorityChangeTitle(account: DashboardAccount) {
+  return changeTitle('Priority', account.last_current_priority, account.last_target_priority, account.last_decided_at)
 }
 
 function subscriptionText(account: DashboardAccount) {
@@ -645,13 +664,13 @@ onMounted(() => {
                   <span>{{ fmtHours(account.remaining_hours) }} 剩余</span>
                 </div>
               </td>
-              <td :class="['num', 'lf-column', lfClass(account)]">
+              <td :class="['num', 'lf-column', lfClass(account)]" :title="lfChangeTitle(account)">
                 <div class="lf-cell">
-                  <strong>{{ account.last_current_load_factor ?? '-' }} -> {{ account.last_target_load_factor ?? '-' }}</strong>
+                  <strong>{{ currentLoadFactor(account) ?? '-' }}</strong>
                   <span>需 {{ fmtRate(account.required_rate) }} / 近 {{ fmtRate(account.recent_rate) }}</span>
                 </div>
               </td>
-              <td class="num">{{ priorityText(account) }}</td>
+              <td class="num" :title="priorityChangeTitle(account)">{{ currentPriority(account) ?? '-' }}</td>
               <td class="num">{{ fmtPct(account.last_5h_used) }}</td>
               <td class="num">{{ fmtPct(account.projected_7d_end) }}</td>
               <td>
