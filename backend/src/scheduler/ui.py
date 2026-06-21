@@ -27,8 +27,9 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from .api import AdminAPI
-from .config import load_config
+from .config import Config, load_config
 from .codex_invite import CodexInviteReset, InviteResetError
+from .runner import _touch_heartbeat, tick
 from .store import Store
 
 STATIC_DIR = Path(__file__).with_name("frontend")
@@ -444,17 +445,20 @@ def serve(
     admin_key: str = "",
     codex_invite_base_url: str = "",
     frame_ancestors: tuple[str, ...] = (),
+    cfg: Config | None = None,
 ) -> None:
-    Store(db_path).close()
+    runtime_cfg = _runtime_config(cfg, db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key)
+    Store(runtime_cfg.db_path).close()
     handler = _handler(
-        db_path,
-        heartbeat_file,
-        platform,
-        account_name_pattern,
-        base_url,
-        admin_key,
+        runtime_cfg.db_path,
+        runtime_cfg.heartbeat_file,
+        runtime_cfg.platform,
+        runtime_cfg.account_name_pattern,
+        runtime_cfg.base_url,
+        runtime_cfg.admin_key,
         codex_invite_base_url,
         frame_ancestors,
+        runtime_cfg,
     )
     ThreadingHTTPServer((host, port), handler).serve_forever()
 
@@ -470,24 +474,48 @@ def start_background(
     admin_key: str = "",
     codex_invite_base_url: str = "",
     frame_ancestors: tuple[str, ...] = (),
+    cfg: Config | None = None,
 ) -> ThreadingHTTPServer:
-    Store(db_path).close()
+    runtime_cfg = _runtime_config(cfg, db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key)
+    Store(runtime_cfg.db_path).close()
     server = ThreadingHTTPServer(
         (host, port),
         _handler(
-            db_path,
-            heartbeat_file,
-            platform,
-            account_name_pattern,
-            base_url,
-            admin_key,
+            runtime_cfg.db_path,
+            runtime_cfg.heartbeat_file,
+            runtime_cfg.platform,
+            runtime_cfg.account_name_pattern,
+            runtime_cfg.base_url,
+            runtime_cfg.admin_key,
             codex_invite_base_url,
             frame_ancestors,
+            runtime_cfg,
         ),
     )
     thread = threading.Thread(target=server.serve_forever, name="scheduler-ui", daemon=True)
     thread.start()
     return server
+
+
+def _runtime_config(
+    cfg: Config | None,
+    db_path: str,
+    heartbeat_file: str,
+    platform: str,
+    account_name_pattern: str,
+    base_url: str,
+    admin_key: str,
+) -> Config:
+    if cfg is not None:
+        return cfg
+    return Config(
+        base_url=base_url.rstrip("/"),
+        admin_key=admin_key,
+        platform=platform or "anthropic",
+        account_name_pattern=account_name_pattern,
+        db_path=db_path,
+        heartbeat_file=heartbeat_file,
+    )
 
 
 def snapshot(
@@ -606,6 +634,7 @@ def main() -> None:
         cfg.base_url,
         cfg.admin_key,
         frame_ancestors=cfg.ui_frame_ancestor_hosts,
+        cfg=cfg,
     )
 
 
@@ -618,12 +647,14 @@ def _handler(
     admin_key: str,
     codex_invite_base_url: str = "",
     frame_ancestors: tuple[str, ...] = (),
+    cfg: Config | None = None,
 ) -> type[BaseHTTPRequestHandler]:
-    api = AdminAPI(base_url, admin_key) if base_url and admin_key else None
+    runtime_cfg = _runtime_config(cfg, db_path, heartbeat_file, platform, account_name_pattern, base_url, admin_key)
+    api = AdminAPI(runtime_cfg.base_url, runtime_cfg.admin_key) if runtime_cfg.base_url and runtime_cfg.admin_key else None
     invite = CodexInviteReset(api, codex_invite_base_url or os.environ.get("CODEX_INVITE_RESET_BASE_URL", "")) if api else None
     frame_ancestors_header = _frame_ancestors_header(frame_ancestors)
-    expected_src_origin = _origin(base_url)
-    session_secret = _session_secret(admin_key)
+    expected_src_origin = _origin(runtime_cfg.base_url)
+    session_secret = _session_secret(runtime_cfg.admin_key)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -636,7 +667,13 @@ def _handler(
             if parsed.path == "/api/snapshot":
                 limit = _limit(parse_qs(parsed.query).get("limit"))
                 body = json.dumps(
-                    snapshot(db_path, heartbeat_file, limit, platform, account_name_pattern),
+                    snapshot(
+                        runtime_cfg.db_path,
+                        runtime_cfg.heartbeat_file,
+                        limit,
+                        runtime_cfg.platform,
+                        runtime_cfg.account_name_pattern,
+                    ),
                     ensure_ascii=False,
                 )
                 self._send_text(HTTPStatus.OK, body, "application/json; charset=utf-8")
@@ -654,6 +691,8 @@ def _handler(
                 self._send_json(auth.status, {"error": auth.error})
                 return
             if self._handle_scheduler_control_post(parsed.path):
+                return
+            if self._handle_scheduler_refresh_post(parsed.path, api):
                 return
             if self._handle_invite_reset_post(parsed.path, invite):
                 return
@@ -675,7 +714,7 @@ def _handler(
             if not token:
                 return _AuthResult(False, HTTPStatus.UNAUTHORIZED, "embedded token is required")
             try:
-                profile = _validate_sub2api_admin(base_url, token, user_id)
+                profile = _validate_sub2api_admin(runtime_cfg.base_url, token, user_id)
             except _AuthError as e:
                 return _AuthResult(False, e.status, str(e))
             self._set_embedded_session(profile["user_id"])
@@ -734,7 +773,7 @@ def _handler(
                 paused = payload["paused"]
                 if not isinstance(paused, bool):
                     raise ValueError("paused must be a boolean")
-                store = Store(db_path)
+                store = Store(runtime_cfg.db_path)
                 try:
                     control = store.set_account_paused(account_id, paused, datetime.now(UTC))
                 finally:
@@ -743,6 +782,32 @@ def _handler(
                     "account_id": control.account_id,
                     "scheduler_paused": control.paused,
                     "scheduler_control_updated_at": _iso(control.updated_at),
+                })
+            except ValueError as e:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+            except Exception as e:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(e)})
+            return True
+
+        def _handle_scheduler_refresh_post(self, path: str, api: AdminAPI | None) -> bool:
+            if path != "/api/scheduler/refresh":
+                return False
+            if api is None:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "admin api is not configured"})
+                return True
+            try:
+                payload = self._read_json()
+                _verify_sensitive_password(payload)
+                store = Store(runtime_cfg.db_path)
+                try:
+                    terminal_active = tick(runtime_cfg, api, store)
+                finally:
+                    store.close()
+                _touch_heartbeat(runtime_cfg.heartbeat_file)
+                self._send_json(HTTPStatus.OK, {
+                    "ok": True,
+                    "terminal_active": terminal_active,
+                    "triggered_at": _iso(datetime.now(UTC)),
                 })
             except ValueError as e:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})

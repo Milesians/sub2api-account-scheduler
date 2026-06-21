@@ -172,6 +172,13 @@ html.embedded .wrap {
   min-width: 0;
 }
 
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .eyebrow {
   margin-bottom: 3px;
   color: var(--accent-ink);
@@ -726,7 +733,8 @@ tbody tr:hover {
     content: none;
   }
 
-  .topbar .primary-action,
+  .topbar-actions,
+  .topbar-actions button,
   .modal-head button,
   .stack button {
     width: 100%;

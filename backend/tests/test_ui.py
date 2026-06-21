@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from scheduler.config import Config
 from scheduler.models import AccountProfile, AccountState, Decision
 from scheduler.store import Store
 from scheduler.ui import snapshot, start_background
@@ -396,6 +397,129 @@ def test_scheduler_control_route_toggles_paused(tmp_path):
         server.server_close()
         profile_server.shutdown()
         profile_server.server_close()
+
+
+def test_scheduler_refresh_route_runs_tick_with_active_probe(tmp_path):
+    db = tmp_path / "scheduler.db"
+    heartbeat = tmp_path / "last_tick"
+    Store(str(db)).close()
+    seen = {"usage": [], "updates": []}
+
+    class AdminHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/api/v1/user/profile":
+                _send_profile(self)
+                return
+            if self.path.startswith("/api/v1/admin/accounts/7/usage"):
+                seen["usage"].append(self.path)
+                now = datetime.now(UTC)
+                body = {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "five_hour": {
+                            "utilization": 12.0,
+                            "resets_at": (now + timedelta(hours=2)).isoformat(),
+                        },
+                        "seven_day": {
+                            "utilization": 41.0,
+                            "resets_at": (now + timedelta(hours=84)).isoformat(),
+                        },
+                    },
+                }
+            elif self.path.startswith("/api/v1/admin/accounts?"):
+                body = {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": [{
+                            "id": 7,
+                            "name": "pay1",
+                            "type": "oauth",
+                            "priority": 1050,
+                            "concurrency": 1,
+                            "load_factor": 1,
+                            "status": "active",
+                            "schedulable": True,
+                            "extra": {
+                                "codex_7d_used_percent": 30.0,
+                                "codex_5h_used_percent": 10.0,
+                                "codex_7d_reset_at": "2026-06-15T22:00:00Z",
+                                "codex_5h_reset_at": "2026-06-12T12:00:00Z",
+                                "codex_usage_updated_at": "2026-06-12T09:59:00Z",
+                            },
+                        }],
+                        "pages": 1,
+                    },
+                }
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_POST(self):
+            if self.path != "/api/v1/admin/accounts/bulk-update":
+                self.send_response(404)
+                self.end_headers()
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            seen["updates"].append(json.loads(self.rfile.read(length) or b"{}"))
+            body = {"code": 0, "message": "success", "data": {}}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    admin_server = HTTPServer(("127.0.0.1", 0), AdminHandler)
+    threading.Thread(target=admin_server.serve_forever, daemon=True).start()
+    base_url = f"http://127.0.0.1:{admin_server.server_address[1]}"
+    cfg = Config(
+        base_url=base_url,
+        admin_key="secret",
+        platform="openai",
+        db_path=str(db),
+        heartbeat_file=str(heartbeat),
+        account_profile_refresh_enabled=False,
+    )
+    ui_server = start_background("127.0.0.1", 0, str(db), str(heartbeat), cfg=cfg)
+    try:
+        host, port = ui_server.server_address
+        cookie = _auth_cookie(ui_server, base_url)
+        req = Request(
+            f"http://{host}:{port}/api/scheduler/refresh",
+            data=json.dumps({"sensitive_password": "123456"}).encode(),
+            headers={"Content-Type": "application/json", "Cookie": cookie},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        store = Store(str(db))
+        try:
+            decision = store.conn.execute("SELECT * FROM decision_log WHERE account_id = 7").fetchone()
+            state = store.load_states()[7]
+        finally:
+            store.close()
+
+        assert data["ok"] is True
+        assert seen["usage"] == ["/api/v1/admin/accounts/7/usage?source=active&force=true"]
+        assert seen["updates"]
+        assert decision["usage_source"] == "active"
+        assert decision["seven_day_used"] == 41.0
+        assert state.last_7d_used == 41.0
+        assert heartbeat.exists()
+    finally:
+        ui_server.shutdown()
+        ui_server.server_close()
+        admin_server.shutdown()
+        admin_server.server_close()
 
 
 def test_sensitive_post_rejects_wrong_password(tmp_path):

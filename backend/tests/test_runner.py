@@ -35,14 +35,17 @@ class FakeAPI:
 
     def probe_usage(self, account_id):
         self.probed.append(account_id)
-        return None
+        return {
+            "five_hour": {"utilization": 11.0, "resets_at": "2026-06-12T12:00:00Z"},
+            "seven_day": {"utilization": 31.0, "resets_at": "2026-06-15T22:00:00Z"},
+        }
 
     def bulk_update_accounts(self, account_ids, fields):
         self.updated.append((account_ids, fields))
         return True
 
 
-def test_tick_skips_paused_accounts(tmp_path):
+def test_tick_probes_paused_accounts_without_scheduling(tmp_path):
     db = tmp_path / "scheduler.db"
     store = Store(str(db))
     store.set_account_paused(7, True, NOW)
@@ -58,14 +61,48 @@ def test_tick_skips_paused_accounts(tmp_path):
         runner.tick(cfg, api, store)
         states = store.load_states()
         decisions = store.conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0]
+        samples = store.conn.execute("SELECT source, seven_day_used FROM usage_sample").fetchall()
     finally:
         store.close()
 
     assert 7 in states
-    assert states[7].last_7d_used == 30.0
+    assert states[7].last_7d_used == 31.0
+    assert states[7].last_probe_attempt_at is not None
     assert decisions == 0
-    assert api.probed == []
+    assert [dict(row) for row in samples] == [{"source": "active", "seven_day_used": 31.0}]
+    assert api.probed == [7]
     assert api.updated == []
+
+
+def test_tick_does_not_schedule_from_passive_usage_when_probe_fails(tmp_path):
+    class FailingProbeAPI(FakeAPI):
+        def probe_usage(self, account_id):
+            self.probed.append(account_id)
+            return None
+
+    db = tmp_path / "scheduler.db"
+    store = Store(str(db))
+    api = FailingProbeAPI()
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        account_profile_refresh_enabled=False,
+    )
+
+    try:
+        runner.tick(cfg, api, store)
+        row = store.conn.execute("SELECT * FROM decision_log WHERE account_id = 7").fetchone()
+        sample_count = store.conn.execute("SELECT COUNT(*) FROM usage_sample").fetchone()[0]
+    finally:
+        store.close()
+
+    assert api.probed == [7]
+    assert api.updated == []
+    assert row["reason"] == "no_data_hold"
+    assert row["seven_day_used"] is None
+    assert row["usage_source"] == "missing"
+    assert sample_count == 0
 
 
 def stale_snap(account_id, *, sampled_at, seven_day=80.0, reset_hours=84.0, priority=1050):
@@ -88,43 +125,12 @@ def stale_snap(account_id, *, sampled_at, seven_day=80.0, reset_hours=84.0, prio
     )
 
 
-def test_terminal_probe_uses_shorter_stale_threshold_and_larger_budget():
-    cfg = Config(base_url="http://admin", admin_key="secret", platform="openai")
-    terminal = [
-        stale_snap(i, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0 + i, reset_hours=6)
-        for i in range(1, 31)
-    ]
-    normal = stale_snap(100, sampled_at=NOW - timedelta(minutes=25), seven_day=20.0, reset_hours=84)
-    stale = [s for s in [*terminal, normal] if runner._snapshot_stale(s, cfg, NOW)]
-
-    assert len(stale) == 30
-    assert runner._probe_budget([*terminal, normal], stale, cfg, NOW) == 20
-
-
 def test_terminal_probe_score_prioritizes_gap_and_protective_band():
     cfg = Config(base_url="http://admin", admin_key="secret", platform="openai")
     urgent = stale_snap(1, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0, reset_hours=3, priority=1070)
     less_urgent = stale_snap(2, sampled_at=NOW - timedelta(minutes=25), seven_day=99.3, reset_hours=20)
 
     assert runner._probe_score(urgent, None, cfg, NOW) > runner._probe_score(less_urgent, None, cfg, NOW)
-
-
-def test_probe_budget_respects_terminal_max_when_regular_budget_is_larger():
-    cfg = Config(
-        base_url="http://admin",
-        admin_key="secret",
-        platform="openai",
-        max_active_probes_per_round=100,
-        terminal_min_active_probes_per_round=10,
-        terminal_max_active_probes_per_round=30,
-        terminal_active_probe_ratio=1.0,
-    )
-    terminal = [
-        stale_snap(i, sampled_at=NOW - timedelta(minutes=25), seven_day=80.0, reset_hours=6)
-        for i in range(1, 50)
-    ]
-
-    assert runner._probe_budget(terminal, terminal, cfg, NOW) == 30
 
 
 def test_tick_returns_terminal_active_when_eligible_account_is_in_drain_window(tmp_path):
@@ -139,6 +145,14 @@ def test_tick_returns_terminal_active_when_eligible_account_is_in_drain_window(t
                 "codex_usage_updated_at": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
             }
             return [account]
+
+        def probe_usage(self, account_id):
+            self.probed.append(account_id)
+            now = datetime.now(UTC)
+            return {
+                "five_hour": {"utilization": 10.0, "resets_at": (now + timedelta(hours=2)).isoformat()},
+                "seven_day": {"utilization": 90.0, "resets_at": (now + timedelta(hours=6)).isoformat()},
+            }
 
     db = tmp_path / "scheduler.db"
     store = Store(str(db))

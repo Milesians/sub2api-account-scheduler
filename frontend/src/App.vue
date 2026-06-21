@@ -112,6 +112,7 @@ interface InviteStatus {
 const snapshot = ref<Snapshot | null>(null)
 const error = ref('')
 const loading = ref(false)
+const manualRunLoading = ref(false)
 const controlLoading = ref<number | null>(null)
 const inviteOpen = ref(false)
 const inviteAccount = ref<DashboardAccount | null>(null)
@@ -355,6 +356,25 @@ async function toggleScheduler(account: DashboardAccount) {
   }
 }
 
+async function runSchedulerNow() {
+  if (manualRunLoading.value) return
+  const password = await requestSensitivePassword()
+  if (password === null) return
+  manualRunLoading.value = true
+  error.value = ''
+  try {
+    await requestJson('/api/scheduler/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ sensitive_password: password })
+    })
+    await loadSnapshot()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '手动调度失败'
+  } finally {
+    manualRunLoading.value = false
+  }
+}
+
 function requestSensitivePassword(): Promise<string | null> {
   passwordOpen.value = true
   passwordInput.value = ''
@@ -515,9 +535,14 @@ onMounted(() => {
           <span>最近一轮 {{ snapshot?.summary.last_run_id || '-' }}</span>
         </div>
       </div>
-      <button type="button" class="primary-action" :disabled="loading" @click="loadSnapshot">
-        {{ loading ? '刷新中' : '刷新' }}
-      </button>
+      <div class="topbar-actions">
+        <button type="button" :disabled="loading || manualRunLoading" @click="loadSnapshot">
+          {{ loading ? '刷新中' : '刷新' }}
+        </button>
+        <button type="button" class="primary-action" :disabled="manualRunLoading" @click="runSchedulerNow">
+          {{ manualRunLoading ? '调度中' : '刷新并调度' }}
+        </button>
+      </div>
     </div>
   </header>
 

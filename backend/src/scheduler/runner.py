@@ -1,9 +1,8 @@
-"""每轮 tick 编排：拉数据 -> 名称过滤 -> 按需探测 -> 决策 -> bulk-update -> 落库 -> 老化 -> 心跳。"""
+"""每轮 tick 编排：拉数据 -> 名称过滤 -> 主动探测 -> 决策 -> bulk-update -> 落库 -> 老化 -> 心跳。"""
 
 from __future__ import annotations
 
 import logging
-import math
 import re
 import time
 import uuid
@@ -55,8 +54,8 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
         run_id, len(snaps), len(managed), len(eligible), len(paused_ids),
     )
 
-    probed = _probe_stale(eligible, states, cfg, api, now)
-    store.attach_recent_5h_burn(eligible)
+    probed = _probe_active_usage(managed, states, cfg, api, now)
+    store.attach_recent_5h_burn(managed)
     terminal_active = any(_is_terminal_snapshot(s, cfg, now) for s in eligible)
 
     decisions, new_states = decide(eligible, states, cfg, now)
@@ -91,7 +90,7 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
 
     _save_managed_states(managed, states, new_states, now)
     store.save_states(list(new_states.values()), now)
-    store.add_samples(eligible, decisions)
+    store.add_samples(managed, decisions)
     store.add_decisions(run_id, decisions, now)
     store.prune(cfg.sample_retention_days, cfg.decision_retention_days, cfg.state_retention_days)
 
@@ -99,29 +98,22 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
     return terminal_active
 
 
-def _probe_stale(
-    eligible: list[AccountSnapshot],
+def _probe_active_usage(
+    snaps: list[AccountSnapshot],
     states: dict[int, AccountState],
     cfg: Config,
     api: AdminAPI,
     now: datetime,
 ) -> int:
-    """对被动数据缺失/过期的账号做限量 active 探测，结果直接合并进快照。
+    """主动探测 managed 账号用量，决策只使用本轮 active 数据。
 
     探测响应里才有 sonnet 窗口数据；探测同时触发 sub2api 回写被动缓存。
-    按 sampled_at 最旧优先，超出名额的下轮自然轮转。
     """
-    stale = [
-        s for s in eligible
-        if _snapshot_stale(s, cfg, now)
-    ]
-    stale.sort(key=lambda s: _probe_score(s, states.get(s.id), cfg, now), reverse=True)
-    budget = _probe_budget(eligible, stale, cfg, now)
-
     probed = 0
-    for snap in stale[:budget]:
+    for snap in sorted(snaps, key=lambda s: _probe_score(s, states.get(s.id), cfg, now), reverse=True):
         state = states.setdefault(snap.id, AccountState(account_id=snap.id))
         state.last_probe_attempt_at = now
+        _clear_passive_usage(snap)
         usage = api.probe_usage(snap.id)
         probed += 1
         if usage is not None:
@@ -132,15 +124,14 @@ def _probe_stale(
     return probed
 
 
-def _snapshot_stale(snap: AccountSnapshot, cfg: Config, now: datetime) -> bool:
-    if snap.sampled_at is None or snap.seven_day_used is None:
-        return True
-    threshold = (
-        cfg.terminal_usage_stale_threshold_minutes
-        if _is_terminal_snapshot(snap, cfg, now)
-        else cfg.usage_stale_threshold_minutes
-    )
-    return (now - snap.sampled_at) > timedelta(minutes=threshold)
+def _clear_passive_usage(snap: AccountSnapshot) -> None:
+    snap.five_hour_used = None
+    snap.seven_day_used = None
+    snap.seven_day_sonnet_used = None
+    snap.seven_day_reset_at = None
+    snap.five_hour_reset_at = None
+    snap.sampled_at = None
+    snap.usage_source = "missing"
 
 
 def _is_terminal_snapshot(snap: AccountSnapshot, cfg: Config, now: datetime) -> bool:
@@ -148,26 +139,6 @@ def _is_terminal_snapshot(snap: AccountSnapshot, cfg: Config, now: datetime) -> 
         return False
     remaining_h = (snap.seven_day_reset_at - now).total_seconds() / 3600.0
     return 0.0 < remaining_h <= cfg.terminal_window_hours
-
-
-def _probe_budget(
-    eligible: list[AccountSnapshot],
-    stale: list[AccountSnapshot],
-    cfg: Config,
-    now: datetime,
-) -> int:
-    terminal_stale = sum(1 for s in stale if _is_terminal_snapshot(s, cfg, now))
-    if terminal_stale == 0:
-        return cfg.max_active_probes_per_round
-    terminal_total = sum(1 for s in eligible if _is_terminal_snapshot(s, cfg, now))
-    terminal_budget = max(
-        cfg.terminal_min_active_probes_per_round,
-        math.ceil(terminal_total * cfg.terminal_active_probe_ratio),
-    )
-    return min(
-        cfg.terminal_max_active_probes_per_round,
-        max(cfg.max_active_probes_per_round, terminal_budget),
-    )
 
 
 def _probe_score(snap: AccountSnapshot, state: AccountState | None, cfg: Config, now: datetime) -> float:
@@ -212,10 +183,11 @@ def _save_managed_states(
             continue
         state = states.get(snap.id) or AccountState(account_id=snap.id)
         state.last_priority = snap.priority
-        state.last_7d_used = snap.seven_day_used
-        state.last_5h_used = snap.five_hour_used
-        state.last_7d_reset_at = snap.seven_day_reset_at
-        state.last_sampled_at = snap.sampled_at or now
+        if snap.seven_day_used is not None and snap.sampled_at is not None:
+            state.last_7d_used = snap.seven_day_used
+            state.last_5h_used = snap.five_hour_used
+            state.last_7d_reset_at = snap.seven_day_reset_at
+            state.last_sampled_at = snap.sampled_at
         new_states[snap.id] = state
 
 
