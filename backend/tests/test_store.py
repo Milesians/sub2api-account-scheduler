@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from scheduler.models import AccountSnapshot, AccountState, Decision
+from scheduler.models import AccountProfile, AccountSnapshot, AccountState, Decision
 from scheduler.store import SCHEMA_VERSION, Store
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
@@ -137,6 +137,44 @@ def test_decision_log_keeps_scheduler_metrics(tmp_path):
         assert row["drain_pressure"] == 2.3
         assert row["drain_level"] == "strong"
         assert row["deadline_hours"] == 11.75
+    finally:
+        store.close()
+
+
+def test_delete_absent_accounts_removes_state_control_profile_and_samples(tmp_path):
+    store = Store(str(tmp_path / "scheduler.db"))
+    try:
+        store.save_states([
+            AccountState(account_id=1, last_priority=1050),
+            AccountState(account_id=2, last_priority=1050),
+        ], NOW)
+        store.set_account_paused(2, True, NOW)
+        store.save_account_profiles([
+            AccountProfile(account_id=2, email="deleted@example.com"),
+        ], NOW)
+        sample = AccountSnapshot(
+            id=2,
+            name="deleted",
+            priority=1050,
+            status="active",
+            schedulable=True,
+            rate_limited=False,
+            overloaded=False,
+            temp_unschedulable=False,
+            seven_day_used=40.0,
+            seven_day_reset_at=RESET,
+            sampled_at=NOW,
+            usage_source="active",
+        )
+        store.add_samples([sample])
+
+        deleted = store.delete_absent_accounts([1])
+
+        assert deleted == 4
+        assert set(store.load_states()) == {1}
+        assert store.load_account_controls() == {}
+        assert store.load_account_profiles([2]) == {}
+        assert store.conn.execute("SELECT COUNT(*) FROM usage_sample WHERE account_id = 2").fetchone()[0] == 0
     finally:
         store.close()
 

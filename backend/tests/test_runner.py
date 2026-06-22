@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import scheduler.runner as runner
 from scheduler.config import Config
-from scheduler.models import AccountSnapshot
+from scheduler.models import AccountSnapshot, AccountState
 from scheduler.store import Store
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
@@ -105,6 +105,30 @@ def test_tick_does_not_schedule_from_passive_usage_when_probe_fails(tmp_path):
     assert row["seven_day_used"] is None
     assert row["usage_source"] == "missing"
     assert sample_count == 0
+
+
+def test_tick_removes_accounts_missing_from_admin_list(tmp_path):
+    db = tmp_path / "scheduler.db"
+    store = Store(str(db))
+    store.save_states([AccountState(account_id=99, last_priority=1050)], NOW)
+    store.set_account_paused(99, True, NOW)
+    api = FakeAPI()
+    cfg = Config(
+        base_url="http://admin",
+        admin_key="secret",
+        platform="openai",
+        account_profile_refresh_enabled=False,
+    )
+
+    try:
+        runner.tick(cfg, api, store)
+        states = store.load_states()
+        controls = store.load_account_controls()
+    finally:
+        store.close()
+
+    assert set(states) == {7}
+    assert 99 not in controls
 
 
 def stale_snap(account_id, *, sampled_at, seven_day=80.0, reset_hours=84.0, priority=1050):

@@ -95,11 +95,15 @@ def tick(cfg: Config, api: AdminAPI, store: Store) -> bool:
 
     _save_managed_states(managed, states, new_states, now)
     store.save_states(list(new_states.values()), now)
+    deleted = store.delete_absent_accounts([s.id for s in managed])
     store.add_samples(managed, decisions)
     store.add_decisions(run_id, decisions, now)
     store.prune(cfg.sample_retention_days, cfg.decision_retention_days, cfg.state_retention_days)
 
-    log.info("run=%s done probes=%d updated=%d terminal_active=%s", run_id, probed, updated, terminal_active)
+    log.info(
+        "run=%s done probes=%d updated=%d deleted_absent=%d terminal_active=%s",
+        run_id, probed, updated, deleted, terminal_active,
+    )
     return terminal_active
 
 

@@ -532,6 +532,26 @@ class Store:
         )
         self.conn.commit()
 
+    def delete_absent_accounts(self, account_ids: list[int]) -> int:
+        """删除本轮已不在 managed 集合里的账号状态和缓存。"""
+        tables = ("account_state", "account_control", "account_profile_cache", "usage_sample")
+        total = 0
+        if account_ids:
+            placeholders = ",".join("?" for _ in account_ids)
+            params = tuple(account_ids)
+            for table in tables:
+                cur = self.conn.execute(
+                    f"DELETE FROM {table} WHERE account_id NOT IN ({placeholders})",
+                    params,
+                )
+                total += max(cur.rowcount, 0)
+        else:
+            for table in tables:
+                cur = self.conn.execute(f"DELETE FROM {table}")
+                total += max(cur.rowcount, 0)
+        self.conn.commit()
+        return total
+
     def prune(self, sample_days: int, decision_days: int, state_days: int) -> None:
         now = datetime.now(UTC)
         self.conn.execute(
